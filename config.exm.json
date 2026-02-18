@@ -1,0 +1,25 @@
+{
+  "api_key": "sk-3b7dd428d530441797a87ff41bf98258",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-chat",
+  "mcp_servers": [
+    {
+      "name": "greeter",
+      "transport": "command",
+      "command": "./bin/greeter",
+      "args": [],
+      "env": {
+        "FOO": "bar"
+      }
+    },
+    {
+      "name": "calculator",
+      "transport": "command",
+      "command": "./bin/calculator",
+      "args": [],
+      "env": {
+        "FOO": "bar"
+      }
+    }
+  ]
+}
