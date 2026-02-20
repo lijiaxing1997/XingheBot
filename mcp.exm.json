@@ -1,0 +1,22 @@
+{
+  "mcp_servers": [
+    {
+      "name": "greeter",
+      "transport": "command",
+      "command": "./bin/greeter",
+      "args": [],
+      "env": {
+        "FOO": "bar"
+      }
+    },
+    {
+      "name": "calculator",
+      "transport": "command",
+      "command": "./bin/calculator-mcp",
+      "args": [],
+      "env": {
+        "PYTHONPATH": "${PYTHONPATH}:./mcp/calculator"
+      }
+    }
+  ]
+}

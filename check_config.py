@@ -9,11 +9,17 @@ import json
 def main():
     print("检查 MCP 服务器配置...")
     
-    # 检查 config.json
+    # 检查 LLM 配置文件
     if os.path.exists("config.json"):
         print("✅ config.json 存在")
+    else:
+        print("❌ config.json 不存在")
+
+    # 检查 MCP 配置文件
+    if os.path.exists("mcp.json"):
+        print("✅ mcp.json 存在")
         try:
-            with open("config.json", "r") as f:
+            with open("mcp.json", "r") as f:
                 config = json.load(f)
             
             # 检查 MCP 服务器配置
@@ -24,11 +30,11 @@ def main():
                     print(f"    传输: {server.get('transport', '未知')}")
                     print(f"    命令: {server.get('command', '未知')}")
             else:
-                print("⚠️  config.json 中没有 mcp_servers 配置")
+                print("⚠️  mcp.json 中没有 mcp_servers 配置")
         except Exception as e:
-            print(f"❌ 读取 config.json 错误: {e}")
+            print(f"❌ 读取 mcp.json 错误: {e}")
     else:
-        print("❌ config.json 不存在")
+        print("❌ mcp.json 不存在")
     
     # 检查包装器脚本
     print("\n检查包装器脚本...")
@@ -47,7 +53,7 @@ def main():
     
     # 检查 MCP 服务器文件
     print("\n检查 MCP 服务器文件...")
-    server_file = "calculator-mcp/calculator_mcp.py"
+    server_file = "mcp/calculator/calculator_mcp.py"
     if os.path.exists(server_file):
         print(f"✅ {server_file} 存在")
     else:

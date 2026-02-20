@@ -81,7 +81,7 @@ def check_python_script(filepath, description):
         return False
 
 def check_mcp_server_config(config_path):
-    '''检查 MCP 服务器配置'''
+    '''检查 MCP 配置文件（mcp_servers）'''
     if not os.path.exists(config_path):
         print(f"❌ 配置文件不存在: {config_path}")
         return False
@@ -91,14 +91,6 @@ def check_mcp_server_config(config_path):
             config = json.load(f)
         
         print(f"📋 配置文件: {config_path}")
-        
-        # 检查基本字段
-        required_fields = ['api_key', 'base_url', 'model']
-        for field in required_fields:
-            if field in config:
-                print(f"  ✅ {field}: {config[field][:20]}..." if len(str(config[field])) > 20 else f"  ✅ {field}: {config[field]}")
-            else:
-                print(f"  ⚠️  {field}: (缺失)")
         
         # 检查 MCP 服务器配置
         if 'mcp_servers' in config:
@@ -144,7 +136,7 @@ def check_calculator_mcp_server():
             print(f"  修复权限失败: {e}")
     
     # 检查主服务器文件
-    server_path = "./calculator-mcp/calculator_mcp.py"
+    server_path = "./mcp/calculator/calculator_mcp.py"
     if not check_file_exists(server_path, "MCP 服务器文件"):
         return False
     
@@ -152,7 +144,7 @@ def check_calculator_mcp_server():
         return False
     
     # 检查依赖文件
-    requirements_path = "./calculator-mcp/requirements.txt"
+    requirements_path = "./mcp/calculator/requirements.txt"
     if check_file_exists(requirements_path, "依赖文件"):
         print(f"  📦 依赖文件: {requirements_path}")
         try:
@@ -199,7 +191,7 @@ def run_quick_test():
             # 检查 shebang
             with open(wrapper_path, 'r') as f:
                 first_line = f.readline().strip()
-                if first_line == "#!/usr/bin/env python3":
+                if first_line == "#!/usr/bin/env bash":
                     print("    ✅ Shebang 正确")
                 else:
                     print(f"    ⚠️  Shebang 可能不正确: {first_line}")
@@ -207,7 +199,7 @@ def run_quick_test():
             # 测试导入
             test_code = """
 import sys
-sys.path.insert(0, './calculator-mcp')
+sys.path.insert(0, './mcp/calculator')
 try:
     from calculator_mcp import mcp
     print("    ✅ 可以导入 MCP 服务器")
@@ -240,12 +232,12 @@ def main():
     
     # 检查配置文件
     print("\n📄 检查配置文件")
-    config_files = ['config.json', 'config.exm.json']
+    config_files = ['config.json', 'config.exm.json', 'mcp.json', 'mcp.exm.json']
     for config_file in config_files:
         check_json_syntax(config_file, f"配置文件 {config_file}")
     
-    # 检查主配置文件内容
-    check_mcp_server_config("config.json")
+    # 检查 MCP 配置文件内容
+    check_mcp_server_config("mcp.json")
     
     # 检查 Calculator MCP 服务器
     calculator_ok = check_calculator_mcp_server()
@@ -264,8 +256,8 @@ def main():
     if calculator_ok:
         print("✅ Calculator MCP 服务器配置基本正确")
         print("\n下一步:")
-        print("1. 安装依赖: pip install -r calculator-mcp/requirements.txt")
-        print("2. 测试服务器: cd calculator-mcp && python test_calculator.py")
+        print("1. 安装依赖: pip install -r mcp/calculator/requirements.txt")
+        print("2. 测试服务器: cd mcp/calculator && python test_calculator.py")
         print("3. 启动代理: ./bin/agent chat")
         print("4. 测试工具: 询问 'What calculator tools are available?'")
     else:
@@ -273,8 +265,8 @@ def main():
     
     print("\n详细指南请查看:")
     print("- MCP_INTEGRATION_GUIDE.md")
-    print("- calculator-mcp/README.md")
-    print("- calculator-mcp/INSTALL.md")
+    print("- mcp/calculator/README.md")
+    print("- mcp/calculator/INSTALL.md")
 
 if __name__ == "__main__":
     main()

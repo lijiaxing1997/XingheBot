@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ type Agent struct {
 	Tools        *tools.Registry
 	SkillsDir    string
 	SkillIndex   []skills.Skill
+	MCPReload    func(context.Context) (string, error)
 	Temperature  float32
 	SystemPrompt string
 }
@@ -50,6 +52,8 @@ func (a *Agent) buildSystemPrompt() string {
 	b.WriteString("You are a local coding agent with tool access. Use tools for filesystem operations instead of guessing.\n")
 	b.WriteString("When calling write_file: arguments MUST be valid JSON (no raw code outside JSON). For large files, write in multiple calls with append=true after the first chunk and keep each call small (aim: args <= 6000 bytes) to avoid truncation.\n")
 	b.WriteString("When the user requests skill management, use skill_create or skill_install.\n")
+	b.WriteString("When MCP config/server setup changes at runtime, use mcp_reload to refresh MCP tools without restarting the agent.\n")
+	b.WriteString("If the user asks to refresh/reload MCP in natural language, execute mcp_reload automatically.\n")
 	b.WriteString("If a user mentions a skill name or uses $SkillName, load it with skill_load before proceeding.\n")
 	if len(a.SkillIndex) == 0 {
 		b.WriteString("Available skills: (none).\n")
@@ -87,6 +91,24 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 		if text == "/exit" || text == "/quit" {
 			return nil
 		}
+		if text == "/mcp reload" || text == "/mcp-reload" {
+			msg, err := a.reloadMCP(ctx)
+			if err != nil {
+				fmt.Fprintf(out, "MCP reload failed: %v\n", err)
+				continue
+			}
+			fmt.Fprintln(out, msg)
+			continue
+		}
+		if a.shouldTriggerNaturalLanguageMCPReload(text) {
+			msg, err := a.reloadMCP(ctx)
+			if err != nil {
+				fmt.Fprintf(out, "MCP reload failed: %v\n", err)
+			} else {
+				fmt.Fprintln(out, msg)
+			}
+			continue
+		}
 
 		skillMsgs := a.skillMessagesForInput(text)
 
@@ -117,6 +139,7 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 				break
 			}
 
+			needsAutoMCPReload := false
 			for _, call := range msg.ToolCalls {
 				printer.printToolCall(call.Function.Name, call.Function.Arguments)
 				start := time.Now()
@@ -132,11 +155,31 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 				}
 				turnHistory = append(turnHistory, toolMsg)
 				reqMessages = append(reqMessages, toolMsg)
+				if a.shouldTriggerAutoMCPReloadAfterToolCall(call, err) {
+					needsAutoMCPReload = true
+				}
 
 				if call.Function.Name == "skill_create" || call.Function.Name == "skill_install" {
 					_ = a.ReloadSkills()
 					a.SystemPrompt = a.buildSystemPrompt()
 					systemMsg = llm.Message{Role: "system", Content: a.SystemPrompt}
+				}
+			}
+
+			if needsAutoMCPReload {
+				msg, err := a.reloadMCP(ctx)
+				contextMsg := ""
+				if err != nil {
+					contextMsg = fmt.Sprintf("System event: MCP auto-reload failed after MCP-related updates: %v", err)
+					fmt.Fprintf(out, "MCP auto-reload failed: %v\n", err)
+				} else {
+					contextMsg = "System event: MCP auto-reload completed after MCP-related updates.\n" + msg
+					fmt.Fprintln(out, "MCP auto-reload:", msg)
+				}
+				if strings.TrimSpace(contextMsg) != "" {
+					autoMsg := llm.Message{Role: "system", Content: contextMsg}
+					turnHistory = append(turnHistory, autoMsg)
+					reqMessages = append(reqMessages, autoMsg)
 				}
 			}
 		}
@@ -166,4 +209,151 @@ func (a *Agent) skillMessagesForInput(input string) []llm.Message {
 		}
 	}
 	return msgs
+}
+
+func (a *Agent) reloadMCP(ctx context.Context) (string, error) {
+	if a.MCPReload == nil {
+		return "", fmt.Errorf("MCP reload is not configured")
+	}
+	msg, err := a.MCPReload(ctx)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(msg) == "" {
+		msg = "mcp reload complete"
+	}
+	return msg, nil
+}
+
+func (a *Agent) shouldTriggerNaturalLanguageMCPReload(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return false
+	}
+	if strings.Contains(lower, "mcp_reload") {
+		// Usually discussion about the tool name itself, not an execution intent.
+		return false
+	}
+
+	compact := strings.ReplaceAll(lower, " ", "")
+	compact = strings.ReplaceAll(compact, "\t", "")
+
+	phrases := []string{
+		"reload mcp",
+		"refresh mcp",
+		"mcp reload",
+		"mcp refresh",
+		"reconnect mcp",
+		"刷新mcp",
+		"重载mcp",
+		"重新加载mcp",
+		"重新载入mcp",
+		"重新连接mcp",
+		"mcp刷新",
+		"mcp重载",
+		"mcp重新加载",
+		"mcpreload",
+		"mcprefresh",
+	}
+
+	hasReloadPhrase := false
+	for _, phrase := range phrases {
+		if strings.Contains(lower, phrase) || strings.Contains(compact, phrase) {
+			hasReloadPhrase = true
+			break
+		}
+	}
+	if !hasReloadPhrase {
+		return false
+	}
+
+	questionHints := []string{"?", "？", "什么", "怎么", "如何", "why", "what", "when", "是否", "是不是", "吗", "自动", "manual", "手动"}
+	if containsAny(lower, questionHints) {
+		requestHints := []string{"请", "帮我", "帮忙", "麻烦", "执行", "触发", "please", "can you", "could you", "now", "立即", "立刻", "马上"}
+		return containsAny(lower, requestHints)
+	}
+
+	return true
+}
+
+func (a *Agent) shouldTriggerAutoMCPReloadAfterToolCall(call llm.ToolCall, callErr error) bool {
+	if callErr != nil {
+		return false
+	}
+	name := strings.TrimSpace(call.Function.Name)
+	if name == "" || name == "mcp_reload" {
+		return false
+	}
+
+	args := parseToolArgs(call.Function.Arguments)
+	switch name {
+	case "write_file", "edit_file", "delete_file":
+		return isMCPRelatedPath(argString(args, "path"))
+	case "move_file", "copy_file":
+		return isMCPRelatedPath(argString(args, "src")) || isMCPRelatedPath(argString(args, "dest"))
+	default:
+		return false
+	}
+}
+
+func parseToolArgs(raw string) map[string]any {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func argString(args map[string]any, key string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	v, ok := args[key]
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
+}
+
+func isMCPRelatedPath(path string) bool {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return false
+	}
+	p = strings.Trim(p, "\"'")
+	p = strings.ReplaceAll(p, "\\", "/")
+	p = strings.TrimPrefix(p, "./")
+	lp := strings.ToLower(p)
+
+	if strings.HasPrefix(lp, "mcp/") || strings.Contains(lp, "/mcp/") {
+		return true
+	}
+
+	base := strings.ToLower(filepath.Base(lp))
+	if base == "mcp.json" || base == "mcp.exm.json" {
+		return true
+	}
+
+	if strings.HasPrefix(lp, "bin/") && strings.Contains(base, "mcp") {
+		return true
+	}
+
+	return false
+}
+
+func containsAny(s string, needles []string) bool {
+	for _, needle := range needles {
+		if needle == "" {
+			continue
+		}
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
 }

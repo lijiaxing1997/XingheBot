@@ -85,7 +85,7 @@ See language-specific guides for project setup:
 
 #### 2.1.1 Python Dependency Baseline (Required)
 
-For Python MCP servers, set up dependencies before wiring `config.json`:
+For Python MCP servers, set up dependencies before wiring `mcp.json`:
 
 1. Create a virtual environment inside the server directory (prefer `venv/` for consistency with this project).
 2. Install requirements with that venv's pip (do not rely on global Python packages).
@@ -252,6 +252,11 @@ Load these resources as needed during development:
 
 After developing an MCP server, you need to integrate it into the current project configuration:
 
+**Project directory convention (required in this repo):**
+- Place every MCP server under `mcp/<server-name>/`
+- Keep launch wrappers in `bin/`
+- Do not create new MCP server directories at repository root
+
 #### 1. Create a Robust Wrapper Script (Python MCP)
 Create a wrapper script in `bin/` that always runs with the server's venv Python:
 
@@ -261,7 +266,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-SERVER_DIR="$ROOT_DIR/your-server-directory"
+SERVER_DIR="$ROOT_DIR/mcp/your-server-name"
 VENV_DIR="$SERVER_DIR/venv"
 
 if [ ! -x "$VENV_DIR/bin/python" ]; then
@@ -282,24 +287,20 @@ chmod +x bin/your-server-name
 #### 2. Install Dependencies in the Server venv (Required Once Per Environment)
 
 ```bash
-cd your-server-directory
+cd mcp/your-server-name
 python3 -m venv venv
 ./venv/bin/pip install --upgrade pip
 ./venv/bin/pip install -r requirements.txt
 ./venv/bin/python -c "import pydantic, mcp; print('dependency check: ok')"
 ```
 
-If the import check fails, fix dependencies first. Do not continue to `config.json` integration until this passes.
+If the import check fails, fix dependencies first. Do not continue to `mcp.json` integration until this passes.
 
-#### 3. Update config.json
-Add your MCP server configuration to `config.json`:
+#### 3. Update mcp.json
+Add your MCP server configuration to `mcp.json`:
 
 ```json
 {
-  "api_key": "your-api-key",
-  "base_url": "https://api.deepseek.com",
-  "model": "deepseek-chat",
-  "max_tokens": 8192,
   "mcp_servers": [
     {
       "name": "your-server-name",
@@ -307,7 +308,7 @@ Add your MCP server configuration to `config.json`:
       "command": "./bin/your-server-name",
       "args": [],
       "env": {
-        "PYTHONPATH": "${PYTHONPATH}:./your-server-directory"
+        "PYTHONPATH": "${PYTHONPATH}:./mcp/your-server-name"
       }
     }
   ]
@@ -337,7 +338,7 @@ Add your MCP server configuration to `config.json`:
 
 #### 5. Testing the Integration
 
-1. **Rebuild the agent binary after MCP-related code/config changes:**
+1. **If Go code changed, rebuild agent binary once:**
 ```bash
 go build -o ./bin/agent ./cmd/agent
 ```
@@ -347,18 +348,24 @@ go build -o ./bin/agent ./cmd/agent
 ./bin/agent chat
 ```
 
-3. **Verify MCP tools are available:**
+3. **Load or refresh MCPs without restarting Agent:**
+Use either:
+- Tool call: `mcp_reload`
+- Chat command: `/mcp reload`
+
+4. **Verify MCP tools are available:**
 Ask the agent: "What MCP tools are available?" or "List available tools"
 
-4. **Test specific tools:**
+5. **Test specific tools:**
 Try using your MCP server's tools directly
 
 #### 6. Example: Calculator MCP Server Integration
 
 For the calculator MCP server we developed:
 
-1. **Wrapper script:** `bin/calculator-mcp`
-2. **Configuration in config.json:**
+1. **Server directory:** `mcp/calculator`
+2. **Wrapper script:** `bin/calculator-mcp`
+3. **Configuration in mcp.json:**
 ```json
 {
   "mcp_servers": [
@@ -368,21 +375,21 @@ For the calculator MCP server we developed:
       "command": "./bin/calculator-mcp",
       "args": [],
       "env": {
-        "PYTHONPATH": "${PYTHONPATH}:./calculator-mcp"
+        "PYTHONPATH": "${PYTHONPATH}:./mcp/calculator"
       }
     }
   ]
 }
 ```
 
-3. **Available tools in the agent context (local names):**
+4. **Available tools in the agent context (local names):**
 - `calculator__calculator_basic_operation`
 - `calculator__calculator_advanced_math`
 - `calculator__calculator_trigonometric`
 - `calculator__calculator_statistics`
 - `calculator__calculator_unit_conversion`
 
-4. **Why names differ from server-side tool names:**
+5. **Why names differ from server-side tool names:**
 - Agent-side local tool name format is: `{server_name}__{remote_tool_name}`
 - For this example: `calculator` + `calculator_basic_operation` -> `calculator__calculator_basic_operation`
 - Tool descriptions include a source prefix like `[MCP:calculator] ...`
@@ -406,10 +413,11 @@ For the calculator MCP server we developed:
    - Run wrapper directly to see stderr output: `./bin/your-server-name`
 
 4. **MCP server not showing up in tool list:**
-   - Verify config.json syntax is correct
+   - Verify mcp.json syntax is correct
    - Check server name doesn't conflict with existing servers
    - Ensure transport type is "command" for stdio servers
-   - Rebuild and restart agent after changes: `go build -o ./bin/agent ./cmd/agent`
+   - Reload MCP at runtime: `mcp_reload` or `/mcp reload`
+   - Rebuild/restart agent only when Go code changed
 
 5. **Tool name mismatch confusion:**
    - Remember the agent uses local names with server prefix: `server__tool`
@@ -434,7 +442,7 @@ For the calculator MCP server we developed:
 3. **Python environment reliability:**
    - Always use a project-local venv and call it explicitly in wrapper scripts
    - Keep `requirements.txt` current whenever imports change
-   - Add a dependency smoke check before integrating into `config.json`
+   - Add a dependency smoke check before integrating into `mcp.json`
 
 4. **Performance:**
    - Use async/await for I/O operations

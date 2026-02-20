@@ -48,7 +48,7 @@ func runChat(args []string) error {
 	temperature := fs.Float64("temperature", 0.2, "LLM temperature")
 	maxTokens := fs.Int("max-tokens", 0, "max tokens for completion (overrides config)")
 	configPath := fs.String("config", "config.json", "path to config.json")
-	mcpConfigPath := fs.String("mcp-config", "", "path to MCP config (default: same as --config)")
+	mcpConfigPath := fs.String("mcp-config", "mcp.json", "path to MCP config")
 	fs.Parse(args)
 
 	client, err := llm.NewClientFromConfig(*configPath)
@@ -74,29 +74,43 @@ func runChat(args []string) error {
 	registry.Register(&tools.SkillCreateTool{SkillsDir: *skillsDir})
 	registry.Register(&tools.SkillInstallTool{SkillsDir: *skillsDir})
 
-	cfgPath := *configPath
-	if strings.TrimSpace(*mcpConfigPath) != "" {
-		cfgPath = *mcpConfigPath
+	cfgPath := strings.TrimSpace(*mcpConfigPath)
+	if cfgPath == "" {
+		cfgPath = "mcp.json"
 	}
-	mcpCfg, err := mcpclient.LoadConfig(cfgPath)
-	if err != nil {
-		return err
-	}
-	mcpServers, err := mcpclient.ConnectServers(context.Background(), mcpCfg.Servers)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "warning:", err)
-	}
+	mcpRuntime := mcpclient.NewRuntime(cfgPath)
 	defer func() {
-		if err := mcpclient.CloseServers(mcpServers); err != nil {
+		if err := mcpRuntime.Close(); err != nil {
 			fmt.Fprintln(os.Stderr, "warning:", err)
 		}
 	}()
-	mcpTools, err := mcpclient.ToolsFromServers(mcpServers)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "warning:", err)
+
+	registeredMCPToolNames := make([]string, 0)
+	reloadMCPInternal := func(ctx context.Context) (mcpclient.ReloadReport, error) {
+		report, err := mcpRuntime.Reload(ctx)
+		if err != nil {
+			return report, err
+		}
+		registry.UnregisterMany(registeredMCPToolNames)
+		for _, tool := range mcpRuntime.Tools() {
+			registry.Register(tool)
+		}
+		registeredMCPToolNames = mcpRuntime.ToolNames()
+		return report, nil
 	}
-	for _, tool := range mcpTools {
-		registry.Register(tool)
+	reloadMCP := func(ctx context.Context) (string, error) {
+		report, err := reloadMCPInternal(ctx)
+		if err != nil {
+			return "", err
+		}
+		return report.String(), nil
+	}
+
+	registry.Register(&tools.MCPReloadTool{Reload: reloadMCP})
+	if report, err := reloadMCPInternal(context.Background()); err != nil {
+		fmt.Fprintln(os.Stderr, "warning:", err)
+	} else if len(report.Warnings) > 0 {
+		fmt.Fprintln(os.Stderr, "warning:", report.String())
 	}
 
 	ag, err := agent.New(client, registry, *skillsDir)
@@ -104,8 +118,9 @@ func runChat(args []string) error {
 		return err
 	}
 	ag.Temperature = float32(*temperature)
+	ag.MCPReload = reloadMCP
 
-	fmt.Println("Agent ready. Type /exit to quit.")
+	fmt.Println("Agent ready. Type /mcp reload to refresh MCP servers, or /exit to quit.")
 	return ag.RunInteractive(context.Background(), os.Stdin, os.Stdout)
 }
 

@@ -26,7 +26,7 @@ type ServerConfig struct {
 
 func LoadConfig(path string) (Config, error) {
 	if strings.TrimSpace(path) == "" {
-		path = "config.json"
+		path = "mcp.json"
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

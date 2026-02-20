@@ -70,7 +70,7 @@ Successfully implemented a comprehensive Calculator MCP Server using Python and 
 ### Project Structure
 
 ```
-calculator-mcp/
+mcp/calculator/
 ├── calculator_mcp.py          # Main MCP server implementation
 ├── test_calculator.py         # Unit tests for all tools
 ├── example_usage.py           # Real-world usage examples

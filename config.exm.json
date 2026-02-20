@@ -3,25 +3,5 @@
   "base_url": "https://api.deepseek.com",
   "model": "deepseek-chat",
   "max_tokens": 0,
-  "notes": "max_tokens=0 means omit the parameter (provider default applies). Set a positive value to allow longer single responses if your provider defaults are small.",
-  "mcp_servers": [
-    {
-      "name": "greeter",
-      "transport": "command",
-      "command": "./bin/greeter",
-      "args": [],
-      "env": {
-        "FOO": "bar"
-      }
-    },
-    {
-      "name": "calculator",
-      "transport": "command",
-      "command": "./bin/calculator",
-      "args": [],
-      "env": {
-        "FOO": "bar"
-      }
-    }
-  ]
+  "notes": "max_tokens=0 means omit the parameter (provider default applies). Set a positive value to allow longer single responses if your provider defaults are small."
 }

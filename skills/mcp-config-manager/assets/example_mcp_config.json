@@ -1,0 +1,44 @@
+{
+  "mcp_servers": [
+    {
+      "name": "calculator",
+      "transport": "command",
+      "command": "./bin/calculator-mcp",
+      "args": ["--verbose"],
+      "env": {
+        "PYTHONPATH": "${PYTHONPATH}:./mcp/calculator",
+        "LOG_LEVEL": "INFO"
+      }
+    },
+    {
+      "name": "weather",
+      "transport": "command",
+      "command": "./bin/weather-mcp",
+      "args": ["--api-key", "${WEATHER_API_KEY}"],
+      "env": {
+        "PYTHONPATH": "${PYTHONPATH}:./mcp/weather",
+        "CACHE_DIR": "./cache/weather"
+      }
+    },
+    {
+      "name": "file-manager",
+      "transport": "stdio",
+      "command": "node",
+      "args": ["./mcp/file-manager/index.js"],
+      "env": {
+        "NODE_ENV": "production",
+        "MAX_FILE_SIZE": "10485760"
+      }
+    },
+    {
+      "name": "database",
+      "transport": "sse",
+      "command": "python",
+      "args": ["./mcp/database/server.py", "--port", "8080"],
+      "env": {
+        "DATABASE_URL": "${DATABASE_URL}",
+        "PYTHONPATH": "${PYTHONPATH}:./mcp/database"
+      }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Python bytecode/cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local virtual environments
+venv/
+*/venv/

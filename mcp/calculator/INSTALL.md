@@ -4,7 +4,7 @@
 
 ### Option 1: Using the setup script (Recommended)
 ```bash
-cd calculator-mcp
+cd mcp/calculator
 python setup.py --all
 ```
 
@@ -16,7 +16,7 @@ This will:
 
 ### Option 2: Manual installation
 ```bash
-cd calculator-mcp
+cd mcp/calculator
 
 # Install dependencies
 pip install -r requirements.txt
@@ -51,10 +51,10 @@ See `requirements.txt` for complete list:
 ### 1. Clone or Download
 ```bash
 # If you have the repository
-cd calculator-mcp
+cd mcp/calculator
 
 # Or download the files manually
-# Ensure you have all files from the calculator-mcp directory
+# Ensure you have all files from the mcp/calculator directory
 ```
 
 ### 2. Create Virtual Environment (Optional but Recommended)

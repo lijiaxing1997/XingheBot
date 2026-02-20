@@ -37,8 +37,8 @@ A Python MCP server that provides comprehensive calculator tools for mathematica
 
 ### Quick Setup
 ```bash
-# Navigate to calculator-mcp directory
-cd calculator-mcp
+# Navigate to mcp/calculator directory
+cd mcp/calculator
 
 # Run setup script
 python setup.py --all
@@ -186,7 +186,7 @@ calculator_unit_conversion({
 
 ### Project Structure
 ```
-calculator-mcp/
+mcp/calculator/
 ├── calculator_mcp.py      # Main MCP server implementation
 ├── test_calculator.py     # Test script
 ├── setup.py              # Setup and installation script
