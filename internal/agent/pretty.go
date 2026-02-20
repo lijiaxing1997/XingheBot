@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -77,11 +78,20 @@ func (p toolPrinter) block(label, content string) {
 
 func (p toolPrinter) printToolCall(name, args string) {
 	p.header("TOOL", name, ansiCyan)
+	if server, tool, ok := splitMCPToolName(name); ok {
+		p.line("mcp_server", server, ansiDim, ansiMagenta)
+		p.line("mcp_tool", tool, ansiDim, ansiMagenta)
+	}
 	trimmed := strings.TrimSpace(args)
 	if trimmed != "" {
 		p.line("args_bytes", fmt.Sprintf("%d", len(trimmed)), ansiDim, ansiDim)
 		valid := json.Valid([]byte(trimmed))
 		p.line("args_valid_json", fmt.Sprintf("%t", valid), ansiDim, ansiDim)
+		if valid {
+			if keys := topLevelJSONKeys(trimmed); keys != "" {
+				p.line("arg_keys", keys, ansiDim, ansiDim)
+			}
+		}
 		if !valid {
 			switch {
 			case strings.HasPrefix(trimmed, "#"):
@@ -116,6 +126,49 @@ func (p toolPrinter) printToolResult(name, result string, err error, duration ti
 	if err != nil {
 		p.line("error", err.Error(), ansiDim, ansiRed)
 	}
+
+	server, tool, isMCPTool := splitMCPToolName(name)
+	if isMCPTool {
+		p.line("mcp_server", server, ansiDim, ansiMagenta)
+		p.line("mcp_tool", tool, ansiDim, ansiMagenta)
+	}
+
+	if parsed, ok := parseMCPResult(result); ok {
+		if parsed.IsError != nil {
+			mcpErrColor := ansiGreen
+			if *parsed.IsError {
+				mcpErrColor = ansiRed
+			}
+			p.line("mcp_is_error", fmt.Sprintf("%t", *parsed.IsError), ansiDim, mcpErrColor)
+		}
+		if parsed.ContentItems > 0 {
+			p.line("mcp_content_items", fmt.Sprintf("%d", parsed.ContentItems), ansiDim, ansiDim)
+		}
+		if parsed.Text != "" {
+			p.block("mcp_text", parsed.Text)
+		}
+		if parsed.Structured != "" {
+			p.block("mcp_structured", parsed.Structured)
+		}
+		if parsed.RawJSON != "" {
+			p.block("mcp_output_json", parsed.RawJSON)
+		}
+		fmt.Fprintln(p.out)
+		return
+	}
+
+	if isMCPTool {
+		trimmed := strings.TrimRight(result, "\n")
+		if strings.TrimSpace(trimmed) == "" {
+			p.line("mcp_output", "(empty)", ansiDim, ansiDim)
+			fmt.Fprintln(p.out)
+			return
+		}
+		p.block("mcp_output", trimmed)
+		fmt.Fprintln(p.out)
+		return
+	}
+
 	trimmed := strings.TrimRight(result, "\n")
 	if strings.TrimSpace(trimmed) == "" {
 		p.line("output", "(empty)", ansiDim, ansiDim)
@@ -196,4 +249,130 @@ func formatSkillInstallSummary(raw string) string {
 		}
 		return fmt.Sprintf("source=%s", source)
 	}
+}
+
+func splitMCPToolName(name string) (server string, tool string, ok bool) {
+	parts := strings.SplitN(strings.TrimSpace(name), "__", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	server = strings.TrimSpace(parts[0])
+	tool = strings.TrimSpace(parts[1])
+	if server == "" || tool == "" {
+		return "", "", false
+	}
+	return server, tool, true
+}
+
+func topLevelJSONKeys(raw string) string {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		return ""
+	}
+	if len(obj) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ", ")
+}
+
+type mcpResultInfo struct {
+	IsError      *bool
+	ContentItems int
+	Text         string
+	Structured   string
+	RawJSON      string
+}
+
+func parseMCPResult(raw string) (mcpResultInfo, bool) {
+	var out mcpResultInfo
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || !json.Valid([]byte(trimmed)) {
+		return out, false
+	}
+
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
+		return out, false
+	}
+	if len(obj) == 0 {
+		return out, false
+	}
+
+	content, hasContent := obj["content"]
+	structured, hasStructured := obj["structuredContent"]
+	if !hasStructured {
+		structured, hasStructured = obj["structured_content"]
+	}
+	isErrorRaw, hasIsError := obj["isError"]
+	if !hasIsError {
+		isErrorRaw, hasIsError = obj["is_error"]
+	}
+	if !hasContent && !hasStructured && !hasIsError {
+		return out, false
+	}
+
+	if hasIsError {
+		if v, ok := toBool(isErrorRaw); ok {
+			out.IsError = &v
+		}
+	}
+
+	if items, ok := content.([]any); ok {
+		out.ContentItems = len(items)
+		textParts := make([]string, 0, len(items))
+		for _, item := range items {
+			entry, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			typ, _ := entry["type"].(string)
+			if typ != "text" {
+				continue
+			}
+			text, _ := entry["text"].(string)
+			text = strings.TrimSpace(text)
+			if text != "" {
+				textParts = append(textParts, text)
+			}
+		}
+		out.Text = strings.Join(textParts, "\n")
+	}
+
+	if hasStructured && structured != nil {
+		out.Structured = toPrettyJSON(structured)
+	}
+
+	if out.Text == "" && out.Structured == "" {
+		out.RawJSON = formatJSON(trimmed)
+	}
+
+	return out, true
+}
+
+func toBool(v any) (bool, bool) {
+	switch t := v.(type) {
+	case bool:
+		return t, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+func toPrettyJSON(v any) string {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
