@@ -23,10 +23,18 @@ type Agent struct {
 	MCPReload    func(context.Context) (string, error)
 	Temperature  float32
 	SystemPrompt string
+	PromptMode   PromptMode
 }
 
+type PromptMode string
+
+const (
+	PromptModeChat   PromptMode = "chat"
+	PromptModeWorker PromptMode = "worker"
+)
+
 type TaskHooks struct {
-	BeforeModelCall func(ctx context.Context) error
+	BeforeModelCall func(ctx context.Context) ([]llm.Message, error)
 	BeforeToolCall  func(ctx context.Context, name string, arguments string) error
 	AfterToolCall   func(ctx context.Context, name string, arguments string, result string, callErr error, duration time.Duration) error
 }
@@ -41,12 +49,24 @@ func New(client *llm.Client, registry *tools.Registry, skillsDir string) (*Agent
 		Client:    client,
 		Tools:     registry,
 		SkillsDir: skillsDir,
+		PromptMode: PromptModeChat,
 	}
 	if err := a.ReloadSkills(); err != nil {
 		return nil, err
 	}
 	a.SystemPrompt = a.buildSystemPrompt()
 	return a, nil
+}
+
+func (a *Agent) SetPromptMode(mode PromptMode) {
+	if a == nil {
+		return
+	}
+	if strings.TrimSpace(string(mode)) == "" {
+		mode = PromptModeChat
+	}
+	a.PromptMode = mode
+	a.SystemPrompt = a.buildSystemPrompt()
 }
 
 func (a *Agent) ReloadSkills() error {
@@ -66,6 +86,13 @@ func (a *Agent) buildSystemPrompt() string {
 	b.WriteString("When MCP config/server setup changes at runtime, use mcp_reload to refresh MCP tools without restarting the agent.\n")
 	b.WriteString("If the user asks to refresh/reload MCP in natural language, execute mcp_reload automatically.\n")
 	b.WriteString("For complex tasks, you may create parallel child agents with agent_run_create + agent_spawn, and coordinate using agent_wait, agent_control, agent_signal_send, and agent_signal_wait.\n")
+	switch a.PromptMode {
+	case PromptModeWorker:
+		b.WriteString("You are running as a CHILD worker agent. Focus on completing the assigned task. You may receive additional operator messages mid-run; treat them as updated requirements.\n")
+	default:
+		b.WriteString("You are running as the PRIMARY (gateway) agent in chat mode. Prefer asynchronous multi-agent execution: after planning + spawning child agents, return control to the user instead of blocking. Avoid calling agent_wait unless the user explicitly asks to wait; prefer agent_state / agent_run_list / agent_inspect for progress.\n")
+		b.WriteString("To guide a child agent mid-run, use agent_control with command=\"message\" and payload like {\"text\":\"...\",\"role\":\"user\"}.\n")
+	}
 	b.WriteString("If a user mentions a skill name or uses $SkillName, load it with skill_load before proceeding.\n")
 	if len(a.SkillIndex) == 0 {
 		b.WriteString("Available skills: (none).\n")
@@ -200,7 +227,55 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 
 func (a *Agent) callTool(ctx context.Context, call llm.ToolCall) (string, error) {
 	args := json.RawMessage(call.Function.Arguments)
+	if a.PromptMode == PromptModeChat {
+		switch strings.TrimSpace(call.Function.Name) {
+		case "agent_wait", "agent_signal_wait":
+			args = clampTimeoutSeconds(args, 2, 15)
+		}
+	}
 	return a.Tools.Call(ctx, call.Function.Name, args)
+}
+
+func clampTimeoutSeconds(raw json.RawMessage, defaultSeconds int, maxSeconds int) json.RawMessage {
+	if defaultSeconds <= 0 {
+		defaultSeconds = 2
+	}
+	if maxSeconds <= 0 {
+		maxSeconds = 15
+	}
+
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return raw
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return raw
+	}
+	if obj == nil {
+		return raw
+	}
+
+	timeout := 0
+	if v, ok := obj["timeout_seconds"]; ok {
+		if n, ok := v.(float64); ok {
+			timeout = int(n)
+		}
+	}
+	switch {
+	case timeout <= 0:
+		obj["timeout_seconds"] = defaultSeconds
+	case timeout > maxSeconds:
+		obj["timeout_seconds"] = maxSeconds
+	default:
+		return raw
+	}
+
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 func (a *Agent) RunTask(ctx context.Context, task string, opts TaskOptions) (string, error) {
@@ -223,8 +298,12 @@ func (a *Agent) RunTask(ctx context.Context, task string, opts TaskOptions) (str
 
 	for turn := 0; turn < maxTurns; turn++ {
 		if opts.Hooks.BeforeModelCall != nil {
-			if err := opts.Hooks.BeforeModelCall(ctx); err != nil {
+			injected, err := opts.Hooks.BeforeModelCall(ctx)
+			if err != nil {
 				return "", err
+			}
+			if len(injected) > 0 {
+				reqMessages = append(reqMessages, injected...)
 			}
 		}
 

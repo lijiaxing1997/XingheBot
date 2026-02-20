@@ -16,6 +16,7 @@ type WorkerController struct {
 	AgentID        string
 	LastCommandSeq int64
 	paused         bool
+	pendingMessages []AgentCommand
 }
 
 func NewWorkerController(coord *Coordinator, runID string, agentID string) *WorkerController {
@@ -207,6 +208,7 @@ func (w *WorkerController) pollCommands(ctx context.Context) error {
 			})
 			return ErrAgentCanceled
 		case CommandMessage:
+			w.pendingMessages = append(w.pendingMessages, cmd)
 			_, _ = w.Coord.AppendEvent(w.RunID, w.AgentID, AgentEvent{
 				Type:      "command_message",
 				Message:   "received message",
@@ -228,6 +230,15 @@ func (w *WorkerController) pollCommands(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+func (w *WorkerController) DrainMessages() []AgentCommand {
+	if w == nil || len(w.pendingMessages) == 0 {
+		return nil
+	}
+	out := append([]AgentCommand(nil), w.pendingMessages...)
+	w.pendingMessages = w.pendingMessages[:0]
+	return out
 }
 
 func (w *WorkerController) waitUntilResumed(ctx context.Context, stage string) error {

@@ -29,11 +29,13 @@
 ## 3. 关键工具
 
 - `agent_run_create`: 创建/获取 run。
+- `agent_run_list`: 列出当前 run（用于不知道 run_id 时回答“有什么正在执行”）。
 - `agent_spawn`: 启动子 Agent 进程。
 - `agent_state`: 查询子 Agent 状态。
 - `agent_wait`: 阻塞等待一个或多个子 Agent 结束。
 - `agent_control`: 发送 `pause|resume|cancel|message` 命令。
 - `agent_events`: 拉取事件流。
+- `agent_inspect`: 装载子 Agent 执行上下文（spec/state、最近 events/commands、stdout/stderr tail），便于排查与指导。
 - `agent_result`: 读取最终结果。
 - `agent_signal_send`: 发送信号（跨 Agent 协调）。
 - `agent_signal_wait`: 等待信号（阻塞）。
@@ -45,6 +47,7 @@
 3. 用 `agent_wait` 阻塞等待全部子 Agent 完成。  
 4. 用 `agent_result` 汇总结果。  
 5. 需要中途干预时，用 `agent_control` 发送 `pause/resume/cancel`。  
+   - `message`：`payload` 推荐 `{ "text": "...", "role": "user" }`。子 Agent 会在下一次 model call 前注入为一条消息，从而实现“主 Agent 指导子 Agent 执行”。
 6. 需要“barrier/event”协同时，子 Agent 用 `agent_signal_send` + `agent_signal_wait`。
 
 ## 5. CLI 入口

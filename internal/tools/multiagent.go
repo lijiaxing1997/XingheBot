@@ -208,6 +208,35 @@ func (t *AgentSpawnTool) Call(ctx context.Context, args json.RawMessage) (string
 		return "", err
 	}
 
+	go func(runID string, agentID string) {
+		waitErr := cmd.Wait()
+		if waitErr == nil {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+		state, err := t.Coordinator.ReadAgentState(runID, agentID)
+		if err != nil {
+			return
+		}
+		if multiagent.IsTerminalStatus(state.Status) {
+			return
+		}
+		now := time.Now().UTC()
+		state.Status = multiagent.StatusFailed
+		state.Error = "worker process exited: " + waitErr.Error()
+		state.FinishedAt = now
+		state.UpdatedAt = now
+		_ = t.Coordinator.UpdateAgentState(runID, state)
+		_, _ = t.Coordinator.AppendEvent(runID, agentID, multiagent.AgentEvent{
+			Type:      "process_exit",
+			Message:   "worker process exited unexpectedly",
+			CreatedAt: now,
+			Payload: map[string]any{
+				"error": waitErr.Error(),
+			},
+		})
+	}(spec.RunID, spec.ID)
+
 	now := time.Now().UTC()
 	state.Status = multiagent.StatusRunning
 	state.PID = cmd.Process.Pid

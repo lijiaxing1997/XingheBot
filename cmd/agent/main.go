@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -103,6 +104,7 @@ func runChat(args []string) error {
 	if err != nil {
 		return err
 	}
+	ag.SetPromptMode(agent.PromptModeChat)
 	ag.Temperature = float32(*temperature)
 	ag.MCPReload = rt.ReloadMCP
 
@@ -166,6 +168,7 @@ func runWorker(args []string) error {
 		_ = ctl.Finish("", err)
 		return err
 	}
+	ag.SetPromptMode(agent.PromptModeWorker)
 	ag.Temperature = float32(*temperature)
 	if spec.Temperature != nil {
 		ag.Temperature = float32(*spec.Temperature)
@@ -175,8 +178,55 @@ func runWorker(args []string) error {
 	result, runErr := ag.RunTask(context.Background(), spec.Task, agent.TaskOptions{
 		MaxTurns: spec.MaxTurns,
 		Hooks: agent.TaskHooks{
-			BeforeModelCall: func(ctx context.Context) error {
-				return ctl.Checkpoint(ctx, "before_model_call")
+			BeforeModelCall: func(ctx context.Context) ([]llm.Message, error) {
+				if err := ctl.Checkpoint(ctx, "before_model_call"); err != nil {
+					return nil, err
+				}
+				cmds := ctl.DrainMessages()
+				if len(cmds) == 0 {
+					return nil, nil
+				}
+				msgs := make([]llm.Message, 0, len(cmds))
+				for _, cmd := range cmds {
+					role := "user"
+					if v, ok := cmd.Payload["role"].(string); ok {
+						switch strings.ToLower(strings.TrimSpace(v)) {
+						case "system":
+							role = "system"
+						case "user":
+							role = "user"
+						}
+					}
+
+					text := ""
+					if v, ok := cmd.Payload["text"].(string); ok {
+						text = strings.TrimSpace(v)
+					}
+					if text == "" {
+						if v, ok := cmd.Payload["content"].(string); ok {
+							text = strings.TrimSpace(v)
+						}
+					}
+					if text == "" {
+						if v, ok := cmd.Payload["message"].(string); ok {
+							text = strings.TrimSpace(v)
+						}
+					}
+					if text == "" && len(cmd.Payload) > 0 {
+						if raw, err := json.Marshal(cmd.Payload); err == nil {
+							text = string(raw)
+						}
+					}
+
+					if text == "" {
+						continue
+					}
+					msgs = append(msgs, llm.Message{
+						Role:    role,
+						Content: fmt.Sprintf("[External message seq=%d] %s", cmd.Seq, text),
+					})
+				}
+				return msgs, nil
 			},
 			BeforeToolCall: func(ctx context.Context, name string, arguments string) error {
 				return ctl.BeforeTool(ctx, name, arguments)
@@ -247,6 +297,7 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	workDir, _ := os.Getwd()
 
 	registry.Register(&tools.AgentRunCreateTool{Coordinator: coord})
+	registry.Register(&tools.AgentRunListTool{Coordinator: coord})
 	registry.Register(&tools.AgentSpawnTool{
 		Coordinator:        coord,
 		Executable:         executable,
@@ -261,6 +312,7 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	registry.Register(&tools.AgentWaitTool{Coordinator: coord})
 	registry.Register(&tools.AgentControlTool{Coordinator: coord})
 	registry.Register(&tools.AgentEventsTool{Coordinator: coord})
+	registry.Register(&tools.AgentInspectTool{Coordinator: coord})
 	registry.Register(&tools.AgentResultTool{Coordinator: coord})
 	registry.Register(&tools.AgentSignalSendTool{Coordinator: coord})
 	registry.Register(&tools.AgentSignalWaitTool{Coordinator: coord})

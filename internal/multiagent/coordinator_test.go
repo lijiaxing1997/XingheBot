@@ -150,6 +150,23 @@ func TestWorkerControllerPauseResumeCancel(t *testing.T) {
 		t.Fatalf("expected pause/resume wait, got too short wait")
 	}
 
+	if _, err := coord.AppendCommand(run.ID, spec.ID, AgentCommand{
+		Type:    CommandMessage,
+		Payload: map[string]any{"text": "hello worker"},
+	}); err != nil {
+		t.Fatalf("append message failed: %v", err)
+	}
+	if err := ctl.Checkpoint(context.Background(), "message"); err != nil {
+		t.Fatalf("Checkpoint message failed: %v", err)
+	}
+	msgs := ctl.DrainMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	if got, _ := msgs[0].Payload["text"].(string); got != "hello worker" {
+		t.Fatalf("unexpected message payload: %v", msgs[0].Payload)
+	}
+
 	if _, err := coord.AppendCommand(run.ID, spec.ID, AgentCommand{Type: CommandCancel}); err != nil {
 		t.Fatalf("append cancel failed: %v", err)
 	}
