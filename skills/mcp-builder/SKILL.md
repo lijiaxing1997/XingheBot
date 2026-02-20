@@ -234,3 +234,175 @@ Load these resources as needed during development:
   - XML format specifications
   - Example questions and answers
   - Running an evaluation with the provided scripts
+
+## Project Integration Guide
+
+### Integrating MCP Servers into This Project
+
+After developing an MCP server, you need to integrate it into the current project configuration:
+
+#### 1. Create a Wrapper Script
+Create a wrapper script in the `bin/` directory that runs your MCP server:
+
+```bash
+#!/usr/bin/env python3
+'''
+MCP Server wrapper script
+'''
+
+import os
+import sys
+
+# Add the project directory to Python path
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+server_dir = os.path.join(parent_dir, "your-server-directory")
+
+# Add server directory to Python path
+sys.path.insert(0, server_dir)
+
+# Change to server directory
+os.chdir(server_dir)
+
+# Import and run the MCP server
+from your_server_module import mcp
+
+if __name__ == "__main__":
+    mcp.run()
+```
+
+Make the script executable:
+```bash
+chmod +x bin/your-server-name
+```
+
+#### 2. Update config.json
+Add your MCP server configuration to `config.json`:
+
+```json
+{
+  "api_key": "your-api-key",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-chat",
+  "max_tokens": 8192,
+  "mcp_servers": [
+    {
+      "name": "your-server-name",
+      "transport": "command",
+      "command": "./bin/your-server-name",
+      "args": [],
+      "env": {
+        "PYTHONPATH": "${PYTHONPATH}:./your-server-directory"
+      }
+    }
+  ]
+}
+```
+
+#### 3. Configuration Options
+
+**Transport Types:**
+- `"command"`: Run as a subprocess (for stdio servers)
+- `"http"`: Connect to an HTTP server
+
+**Command Transport Options:**
+- `name`: Unique identifier for the server
+- `transport`: Must be "command" for stdio servers
+- `command`: Path to executable or script
+- `args`: Command-line arguments
+- `env`: Environment variables
+- `dir`: Working directory (optional)
+- `inherit_env`: Whether to inherit parent environment (default: true)
+
+**HTTP Transport Options:**
+- `name`: Unique identifier for the server
+- `transport`: Must be "http" for HTTP servers
+- `url`: Server URL
+- `headers`: HTTP headers (for authentication)
+
+#### 4. Testing the Integration
+
+1. **Start the agent with MCP support:**
+```bash
+./bin/agent chat
+```
+
+2. **Verify MCP tools are available:**
+Ask the agent: "What MCP tools are available?" or "List available tools"
+
+3. **Test specific tools:**
+Try using your MCP server's tools directly
+
+#### 5. Example: Calculator MCP Server Integration
+
+For the calculator MCP server we developed:
+
+1. **Wrapper script:** `bin/calculator-mcp`
+2. **Configuration in config.json:**
+```json
+{
+  "mcp_servers": [
+    {
+      "name": "calculator",
+      "transport": "command",
+      "command": "./bin/calculator-mcp",
+      "args": [],
+      "env": {
+        "PYTHONPATH": "${PYTHONPATH}:./calculator-mcp"
+      }
+    }
+  ]
+}
+```
+
+3. **Available tools:**
+- `calculator_basic_operation`
+- `calculator_advanced_math`
+- `calculator_trigonometric`
+- `calculator_statistics`
+- `calculator_unit_conversion`
+
+#### 6. Troubleshooting
+
+**Common issues and solutions:**
+
+1. **"command not found" error:**
+   - Ensure wrapper script has execute permissions: `chmod +x bin/your-script`
+   - Check shebang line: `#!/usr/bin/env python3`
+
+2. **Import errors:**
+   - Verify Python path includes your server directory
+   - Check dependencies are installed: `pip install -r requirements.txt`
+
+3. **MCP server not showing up:**
+   - Verify config.json syntax is correct
+   - Check server name doesn't conflict with existing servers
+   - Ensure transport type is "command" for stdio servers
+
+4. **Connection errors:**
+   - Test the server independently: `python your_server.py`
+   - Check for Python syntax errors
+   - Verify all required modules are imported
+
+#### 7. Best Practices
+
+1. **Naming conventions:**
+   - Use descriptive server names (e.g., "calculator", "github", "jira")
+   - Tool names should be prefixed with server name (e.g., "calculator_add")
+
+2. **Error handling:**
+   - MCP servers should provide clear error messages
+   - Handle edge cases gracefully
+   - Log errors for debugging
+
+3. **Performance:**
+   - Use async/await for I/O operations
+   - Implement timeouts for external calls
+   - Cache frequently used data when appropriate
+
+4. **Security:**
+   - Validate all inputs
+   - Sanitize outputs
+   - Use environment variables for sensitive data
+   - Implement rate limiting if needed
+
+By following this integration guide, you can successfully deploy your MCP server and make its tools available to the AI agent in this project.

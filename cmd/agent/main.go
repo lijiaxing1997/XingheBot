@@ -46,6 +46,7 @@ func runChat(args []string) error {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
 	skillsDir := fs.String("skills-dir", defaultSkillsDir(), "skills directory")
 	temperature := fs.Float64("temperature", 0.2, "LLM temperature")
+	maxTokens := fs.Int("max-tokens", 0, "max tokens for completion (overrides config)")
 	configPath := fs.String("config", "config.json", "path to config.json")
 	mcpConfigPath := fs.String("mcp-config", "", "path to MCP config (default: same as --config)")
 	fs.Parse(args)
@@ -53,6 +54,9 @@ func runChat(args []string) error {
 	client, err := llm.NewClientFromConfig(*configPath)
 	if err != nil {
 		return err
+	}
+	if *maxTokens > 0 {
+		client.MaxTokens = *maxTokens
 	}
 
 	registry := tools.NewRegistry()

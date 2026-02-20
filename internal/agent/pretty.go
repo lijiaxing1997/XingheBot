@@ -77,6 +77,20 @@ func (p toolPrinter) block(label, content string) {
 
 func (p toolPrinter) printToolCall(name, args string) {
 	p.header("TOOL", name, ansiCyan)
+	trimmed := strings.TrimSpace(args)
+	if trimmed != "" {
+		p.line("args_bytes", fmt.Sprintf("%d", len(trimmed)), ansiDim, ansiDim)
+		valid := json.Valid([]byte(trimmed))
+		p.line("args_valid_json", fmt.Sprintf("%t", valid), ansiDim, ansiDim)
+		if !valid {
+			switch {
+			case strings.HasPrefix(trimmed, "#"):
+				p.line("args_hint", "looks like raw file content (missing JSON wrapper {...})", ansiDim, ansiRed)
+			case strings.HasPrefix(trimmed, "{"):
+				p.line("args_hint", "looks like JSON but is invalid (often truncated by max_tokens)", ansiDim, ansiRed)
+			}
+		}
+	}
 	pretty := formatJSON(args)
 	p.block("args", pretty)
 	if name == "skill_install" {
@@ -98,6 +112,9 @@ func (p toolPrinter) printToolResult(name, result string, err error, duration ti
 	p.line("status", status, ansiDim, statusColor)
 	if duration > 0 {
 		p.line("time", duration.Truncate(time.Millisecond).String(), ansiDim, ansiDim)
+	}
+	if err != nil {
+		p.line("error", err.Error(), ansiDim, ansiRed)
 	}
 	trimmed := strings.TrimRight(result, "\n")
 	if strings.TrimSpace(trimmed) == "" {

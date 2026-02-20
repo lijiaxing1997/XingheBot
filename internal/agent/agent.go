@@ -48,6 +48,7 @@ func (a *Agent) ReloadSkills() error {
 func (a *Agent) buildSystemPrompt() string {
 	var b strings.Builder
 	b.WriteString("You are a local coding agent with tool access. Use tools for filesystem operations instead of guessing.\n")
+	b.WriteString("When calling write_file: arguments MUST be valid JSON (no raw code outside JSON). For large files, write in multiple calls with append=true after the first chunk and keep each call small (aim: args <= 6000 bytes) to avoid truncation.\n")
 	b.WriteString("When the user requests skill management, use skill_create or skill_install.\n")
 	b.WriteString("If a user mentions a skill name or uses $SkillName, load it with skill_load before proceeding.\n")
 	if len(a.SkillIndex) == 0 {
