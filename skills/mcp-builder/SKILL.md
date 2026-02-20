@@ -83,6 +83,17 @@ See language-specific guides for project setup:
 - [⚡ TypeScript Guide](./reference/node_mcp_server.md) - Project structure, package.json, tsconfig.json
 - [🐍 Python Guide](./reference/python_mcp_server.md) - Module organization, dependencies
 
+#### 2.1.1 Python Dependency Baseline (Required)
+
+For Python MCP servers, set up dependencies before wiring `config.json`:
+
+1. Create a virtual environment inside the server directory (prefer `venv/` for consistency with this project).
+2. Install requirements with that venv's pip (do not rely on global Python packages).
+3. Run an import smoke test for critical modules (for example: `pydantic`, `mcp`, and your server module).
+4. Keep `requirements.txt` complete and version-bounded enough to be reproducible.
+
+This avoids the most common integration failure: MCP server is configured but never loads because required Python modules are missing.
+
 #### 2.2 Implement Core Infrastructure
 
 Create shared utilities:
@@ -241,33 +252,26 @@ Load these resources as needed during development:
 
 After developing an MCP server, you need to integrate it into the current project configuration:
 
-#### 1. Create a Wrapper Script
-Create a wrapper script in the `bin/` directory that runs your MCP server:
+#### 1. Create a Robust Wrapper Script (Python MCP)
+Create a wrapper script in `bin/` that always runs with the server's venv Python:
 
 ```bash
-#!/usr/bin/env python3
-'''
-MCP Server wrapper script
-'''
+#!/usr/bin/env bash
+set -euo pipefail
 
-import os
-import sys
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+SERVER_DIR="$ROOT_DIR/your-server-directory"
+VENV_DIR="$SERVER_DIR/venv"
 
-# Add the project directory to Python path
-parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-server_dir = os.path.join(parent_dir, "your-server-directory")
+if [ ! -x "$VENV_DIR/bin/python" ]; then
+  echo "Error: virtual environment not found at $VENV_DIR" >&2
+  echo "Run: cd \"$SERVER_DIR\" && python3 -m venv venv && ./venv/bin/pip install -r requirements.txt" >&2
+  exit 1
+fi
 
-# Add server directory to Python path
-sys.path.insert(0, server_dir)
-
-# Change to server directory
-os.chdir(server_dir)
-
-# Import and run the MCP server
-from your_server_module import mcp
-
-if __name__ == "__main__":
-    mcp.run()
+cd "$SERVER_DIR"
+exec "$VENV_DIR/bin/python" your_server.py
 ```
 
 Make the script executable:
@@ -275,7 +279,19 @@ Make the script executable:
 chmod +x bin/your-server-name
 ```
 
-#### 2. Update config.json
+#### 2. Install Dependencies in the Server venv (Required Once Per Environment)
+
+```bash
+cd your-server-directory
+python3 -m venv venv
+./venv/bin/pip install --upgrade pip
+./venv/bin/pip install -r requirements.txt
+./venv/bin/python -c "import pydantic, mcp; print('dependency check: ok')"
+```
+
+If the import check fails, fix dependencies first. Do not continue to `config.json` integration until this passes.
+
+#### 3. Update config.json
 Add your MCP server configuration to `config.json`:
 
 ```json
@@ -298,7 +314,7 @@ Add your MCP server configuration to `config.json`:
 }
 ```
 
-#### 3. Configuration Options
+#### 4. Configuration Options
 
 **Transport Types:**
 - `"command"`: Run as a subprocess (for stdio servers)
@@ -319,20 +335,25 @@ Add your MCP server configuration to `config.json`:
 - `url`: Server URL
 - `headers`: HTTP headers (for authentication)
 
-#### 4. Testing the Integration
+#### 5. Testing the Integration
 
-1. **Start the agent with MCP support:**
+1. **Rebuild the agent binary after MCP-related code/config changes:**
+```bash
+go build -o ./bin/agent ./cmd/agent
+```
+
+2. **Start the agent with MCP support:**
 ```bash
 ./bin/agent chat
 ```
 
-2. **Verify MCP tools are available:**
+3. **Verify MCP tools are available:**
 Ask the agent: "What MCP tools are available?" or "List available tools"
 
-3. **Test specific tools:**
+4. **Test specific tools:**
 Try using your MCP server's tools directly
 
-#### 5. Example: Calculator MCP Server Integration
+#### 6. Example: Calculator MCP Server Integration
 
 For the calculator MCP server we developed:
 
@@ -354,52 +375,73 @@ For the calculator MCP server we developed:
 }
 ```
 
-3. **Available tools:**
-- `calculator_basic_operation`
-- `calculator_advanced_math`
-- `calculator_trigonometric`
-- `calculator_statistics`
-- `calculator_unit_conversion`
+3. **Available tools in the agent context (local names):**
+- `calculator__calculator_basic_operation`
+- `calculator__calculator_advanced_math`
+- `calculator__calculator_trigonometric`
+- `calculator__calculator_statistics`
+- `calculator__calculator_unit_conversion`
 
-#### 6. Troubleshooting
+4. **Why names differ from server-side tool names:**
+- Agent-side local tool name format is: `{server_name}__{remote_tool_name}`
+- For this example: `calculator` + `calculator_basic_operation` -> `calculator__calculator_basic_operation`
+- Tool descriptions include a source prefix like `[MCP:calculator] ...`
+
+#### 7. Troubleshooting
 
 **Common issues and solutions:**
 
 1. **"command not found" error:**
    - Ensure wrapper script has execute permissions: `chmod +x bin/your-script`
-   - Check shebang line: `#!/usr/bin/env python3`
+   - Check shebang line matches your wrapper type (recommended Python MCP wrapper: `#!/usr/bin/env bash`)
 
-2. **Import errors:**
-   - Verify Python path includes your server directory
-   - Check dependencies are installed: `pip install -r requirements.txt`
+2. **Import errors (`ModuleNotFoundError`, e.g. `pydantic`):**
+   - Ensure dependencies are installed in the server venv: `./venv/bin/pip install -r requirements.txt`
+   - Verify the wrapper executes `./venv/bin/python` rather than system `python3`
+   - Run smoke test: `./venv/bin/python -c "import pydantic, mcp"`
 
-3. **MCP server not showing up:**
+3. **Virtual environment exists but server still fails to start:**
+   - Check wrapper path and execute permission: `ls -l bin/your-server-name`
+   - Confirm `VENV_DIR` points to the correct folder
+   - Run wrapper directly to see stderr output: `./bin/your-server-name`
+
+4. **MCP server not showing up in tool list:**
    - Verify config.json syntax is correct
    - Check server name doesn't conflict with existing servers
    - Ensure transport type is "command" for stdio servers
+   - Rebuild and restart agent after changes: `go build -o ./bin/agent ./cmd/agent`
 
-4. **Connection errors:**
-   - Test the server independently: `python your_server.py`
+5. **Tool name mismatch confusion:**
+   - Remember the agent uses local names with server prefix: `server__tool`
+   - Verify by listing tools in chat; look for `[MCP:server-name]` in descriptions
+
+6. **Connection errors:**
+   - Test the server independently with the same interpreter used by wrapper: `./venv/bin/python your_server.py`
    - Check for Python syntax errors
    - Verify all required modules are imported
 
-#### 7. Best Practices
+#### 8. Best Practices
 
 1. **Naming conventions:**
    - Use descriptive server names (e.g., "calculator", "github", "jira")
-   - Tool names should be prefixed with server name (e.g., "calculator_add")
+   - Keep remote tool names clear and action-oriented (e.g., `basic_operation`, `unit_conversion`); agent-side names are exposed as `server__tool`
 
 2. **Error handling:**
    - MCP servers should provide clear error messages
    - Handle edge cases gracefully
    - Log errors for debugging
 
-3. **Performance:**
+3. **Python environment reliability:**
+   - Always use a project-local venv and call it explicitly in wrapper scripts
+   - Keep `requirements.txt` current whenever imports change
+   - Add a dependency smoke check before integrating into `config.json`
+
+4. **Performance:**
    - Use async/await for I/O operations
    - Implement timeouts for external calls
    - Cache frequently used data when appropriate
 
-4. **Security:**
+5. **Security:**
    - Validate all inputs
    - Sanitize outputs
    - Use environment variables for sensitive data
