@@ -25,6 +25,17 @@ type Agent struct {
 	SystemPrompt string
 }
 
+type TaskHooks struct {
+	BeforeModelCall func(ctx context.Context) error
+	BeforeToolCall  func(ctx context.Context, name string, arguments string) error
+	AfterToolCall   func(ctx context.Context, name string, arguments string, result string, callErr error, duration time.Duration) error
+}
+
+type TaskOptions struct {
+	MaxTurns int
+	Hooks    TaskHooks
+}
+
 func New(client *llm.Client, registry *tools.Registry, skillsDir string) (*Agent, error) {
 	a := &Agent{
 		Client:    client,
@@ -54,6 +65,7 @@ func (a *Agent) buildSystemPrompt() string {
 	b.WriteString("When the user requests skill management, use skill_create or skill_install.\n")
 	b.WriteString("When MCP config/server setup changes at runtime, use mcp_reload to refresh MCP tools without restarting the agent.\n")
 	b.WriteString("If the user asks to refresh/reload MCP in natural language, execute mcp_reload automatically.\n")
+	b.WriteString("For complex tasks, you may create parallel child agents with agent_run_create + agent_spawn, and coordinate using agent_wait, agent_control, agent_signal_send, and agent_signal_wait.\n")
 	b.WriteString("If a user mentions a skill name or uses $SkillName, load it with skill_load before proceeding.\n")
 	if len(a.SkillIndex) == 0 {
 		b.WriteString("Available skills: (none).\n")
@@ -189,6 +201,102 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 func (a *Agent) callTool(ctx context.Context, call llm.ToolCall) (string, error) {
 	args := json.RawMessage(call.Function.Arguments)
 	return a.Tools.Call(ctx, call.Function.Name, args)
+}
+
+func (a *Agent) RunTask(ctx context.Context, task string, opts TaskOptions) (string, error) {
+	if a.Client == nil {
+		return "", fmt.Errorf("llm client is nil")
+	}
+	task = strings.TrimSpace(task)
+	if task == "" {
+		return "", fmt.Errorf("task is required")
+	}
+	maxTurns := opts.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = 40
+	}
+
+	systemMsg := llm.Message{Role: "system", Content: a.SystemPrompt}
+	reqMessages := []llm.Message{systemMsg}
+	reqMessages = append(reqMessages, a.skillMessagesForInput(task)...)
+	reqMessages = append(reqMessages, llm.Message{Role: "user", Content: task})
+
+	for turn := 0; turn < maxTurns; turn++ {
+		if opts.Hooks.BeforeModelCall != nil {
+			if err := opts.Hooks.BeforeModelCall(ctx); err != nil {
+				return "", err
+			}
+		}
+
+		resp, err := a.Client.Chat(ctx, llm.ChatRequest{
+			Messages:    reqMessages,
+			Tools:       a.Tools.Definitions(),
+			Temperature: a.Temperature,
+		})
+		if err != nil {
+			return "", err
+		}
+		msg := resp.Choices[0].Message
+		reqMessages = append(reqMessages, msg)
+
+		if len(msg.ToolCalls) == 0 {
+			return msg.Content, nil
+		}
+
+		needsAutoMCPReload := false
+		for _, call := range msg.ToolCalls {
+			if opts.Hooks.BeforeToolCall != nil {
+				if err := opts.Hooks.BeforeToolCall(ctx, call.Function.Name, call.Function.Arguments); err != nil {
+					return "", err
+				}
+			}
+
+			start := time.Now()
+			result, callErr := a.callTool(ctx, call)
+			duration := time.Since(start)
+
+			if opts.Hooks.AfterToolCall != nil {
+				if err := opts.Hooks.AfterToolCall(ctx, call.Function.Name, call.Function.Arguments, result, callErr, duration); err != nil {
+					return "", err
+				}
+			}
+
+			toolMsg := llm.Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    result,
+			}
+			if callErr != nil {
+				toolMsg.Content = "ERROR: " + callErr.Error()
+			}
+			reqMessages = append(reqMessages, toolMsg)
+
+			if a.shouldTriggerAutoMCPReloadAfterToolCall(call, callErr) {
+				needsAutoMCPReload = true
+			}
+			if call.Function.Name == "skill_create" || call.Function.Name == "skill_install" {
+				_ = a.ReloadSkills()
+				a.SystemPrompt = a.buildSystemPrompt()
+				systemMsg = llm.Message{Role: "system", Content: a.SystemPrompt}
+				reqMessages = append(reqMessages, systemMsg)
+			}
+		}
+
+		if needsAutoMCPReload {
+			msg, err := a.reloadMCP(ctx)
+			contextMsg := ""
+			if err != nil {
+				contextMsg = fmt.Sprintf("System event: MCP auto-reload failed after MCP-related updates: %v", err)
+			} else {
+				contextMsg = "System event: MCP auto-reload completed after MCP-related updates.\n" + msg
+			}
+			if strings.TrimSpace(contextMsg) != "" {
+				reqMessages = append(reqMessages, llm.Message{Role: "system", Content: contextMsg})
+			}
+		}
+	}
+
+	return "", fmt.Errorf("task reached max turns: %d", maxTurns)
 }
 
 func (a *Agent) skillMessagesForInput(input string) []llm.Message {

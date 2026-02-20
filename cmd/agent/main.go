@@ -6,13 +6,38 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"test_skill_agent/internal/agent"
 	"test_skill_agent/internal/llm"
 	"test_skill_agent/internal/mcpclient"
+	"test_skill_agent/internal/multiagent"
 	"test_skill_agent/internal/skills"
 	"test_skill_agent/internal/tools"
 )
+
+type runtimeOptions struct {
+	SkillsDir      string
+	Temperature    float64
+	MaxTokens      int
+	ConfigPath     string
+	MCPConfigPath  string
+	MultiAgentRoot string
+}
+
+type agentRuntime struct {
+	Client    *llm.Client
+	Registry  *tools.Registry
+	ReloadMCP func(context.Context) (string, error)
+	closeFn   func() error
+}
+
+func (r *agentRuntime) Close() error {
+	if r == nil || r.closeFn == nil {
+		return nil
+	}
+	return r.closeFn()
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -26,6 +51,11 @@ func main() {
 	switch os.Args[1] {
 	case "chat":
 		if err := runChat(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case "worker":
+		if err := runWorker(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -49,43 +79,139 @@ func runChat(args []string) error {
 	maxTokens := fs.Int("max-tokens", 0, "max tokens for completion (overrides config)")
 	configPath := fs.String("config", "config.json", "path to config.json")
 	mcpConfigPath := fs.String("mcp-config", "mcp.json", "path to MCP config")
+	multiAgentRoot := fs.String("multi-agent-root", ".multi_agent/runs", "path to multi-agent run storage")
 	fs.Parse(args)
 
-	client, err := llm.NewClientFromConfig(*configPath)
+	rt, err := newAgentRuntime(runtimeOptions{
+		SkillsDir:      *skillsDir,
+		Temperature:    *temperature,
+		MaxTokens:      *maxTokens,
+		ConfigPath:     *configPath,
+		MCPConfigPath:  *mcpConfigPath,
+		MultiAgentRoot: *multiAgentRoot,
+	})
 	if err != nil {
 		return err
 	}
-	if *maxTokens > 0 {
-		client.MaxTokens = *maxTokens
-	}
-
-	registry := tools.NewRegistry()
-	registry.Register(&tools.ListFilesTool{})
-	registry.Register(&tools.ReadFileTool{})
-	registry.Register(&tools.WriteFileTool{})
-	registry.Register(&tools.EditFileTool{})
-	registry.Register(&tools.MoveFileTool{})
-	registry.Register(&tools.CopyFileTool{})
-	registry.Register(&tools.DeleteFileTool{})
-	registry.Register(&tools.ExecCommandTool{})
-
-	registry.Register(&tools.SkillListTool{SkillsDir: *skillsDir})
-	registry.Register(&tools.SkillLoadTool{SkillsDir: *skillsDir})
-	registry.Register(&tools.SkillCreateTool{SkillsDir: *skillsDir})
-	registry.Register(&tools.SkillInstallTool{SkillsDir: *skillsDir})
-
-	cfgPath := strings.TrimSpace(*mcpConfigPath)
-	if cfgPath == "" {
-		cfgPath = "mcp.json"
-	}
-	mcpRuntime := mcpclient.NewRuntime(cfgPath)
 	defer func() {
-		if err := mcpRuntime.Close(); err != nil {
+		if err := rt.Close(); err != nil {
 			fmt.Fprintln(os.Stderr, "warning:", err)
 		}
 	}()
 
+	ag, err := agent.New(rt.Client, rt.Registry, *skillsDir)
+	if err != nil {
+		return err
+	}
+	ag.Temperature = float32(*temperature)
+	ag.MCPReload = rt.ReloadMCP
+
+	fmt.Println("Agent ready. Type /mcp reload to refresh MCP servers, or /exit to quit.")
+	return ag.RunInteractive(context.Background(), os.Stdin, os.Stdout)
+}
+
+func runWorker(args []string) error {
+	fs := flag.NewFlagSet("worker", flag.ExitOnError)
+	skillsDir := fs.String("skills-dir", defaultSkillsDir(), "skills directory")
+	temperature := fs.Float64("temperature", 0.2, "default worker temperature")
+	maxTokens := fs.Int("max-tokens", 0, "default worker max tokens")
+	configPath := fs.String("config", "config.json", "path to config.json")
+	mcpConfigPath := fs.String("mcp-config", "mcp.json", "path to MCP config")
+	multiAgentRoot := fs.String("run-root", ".multi_agent/runs", "path to multi-agent run storage")
+	runID := fs.String("run-id", "", "run id")
+	agentID := fs.String("agent-id", "", "agent id")
+	fs.Parse(args)
+
+	if strings.TrimSpace(*runID) == "" || strings.TrimSpace(*agentID) == "" {
+		return fmt.Errorf("--run-id and --agent-id are required")
+	}
+
+	coord := multiagent.NewCoordinator(*multiAgentRoot)
+	ctl := multiagent.NewWorkerController(coord, *runID, *agentID)
+	if err := ctl.Start(os.Getpid()); err != nil {
+		return err
+	}
+
+	spec, err := coord.ReadAgentSpec(*runID, *agentID)
+	if err != nil {
+		_ = ctl.Finish("", err)
+		return err
+	}
+
+	maxTokensValue := *maxTokens
+	if spec.MaxTokens > 0 {
+		maxTokensValue = spec.MaxTokens
+	}
+
+	rt, err := newAgentRuntime(runtimeOptions{
+		SkillsDir:      *skillsDir,
+		Temperature:    *temperature,
+		MaxTokens:      maxTokensValue,
+		ConfigPath:     *configPath,
+		MCPConfigPath:  *mcpConfigPath,
+		MultiAgentRoot: *multiAgentRoot,
+	})
+	if err != nil {
+		_ = ctl.Finish("", err)
+		return err
+	}
+	defer func() {
+		if closeErr := rt.Close(); closeErr != nil {
+			fmt.Fprintln(os.Stderr, "warning:", closeErr)
+		}
+	}()
+
+	ag, err := agent.New(rt.Client, rt.Registry, *skillsDir)
+	if err != nil {
+		_ = ctl.Finish("", err)
+		return err
+	}
+	ag.Temperature = float32(*temperature)
+	if spec.Temperature != nil {
+		ag.Temperature = float32(*spec.Temperature)
+	}
+	ag.MCPReload = rt.ReloadMCP
+
+	result, runErr := ag.RunTask(context.Background(), spec.Task, agent.TaskOptions{
+		MaxTurns: spec.MaxTurns,
+		Hooks: agent.TaskHooks{
+			BeforeModelCall: func(ctx context.Context) error {
+				return ctl.Checkpoint(ctx, "before_model_call")
+			},
+			BeforeToolCall: func(ctx context.Context, name string, arguments string) error {
+				return ctl.BeforeTool(ctx, name, arguments)
+			},
+			AfterToolCall: func(ctx context.Context, name string, arguments string, result string, callErr error, duration time.Duration) error {
+				return ctl.AfterTool(ctx, name, arguments, result, callErr, duration)
+			},
+		},
+	})
+	finishErr := ctl.Finish(result, runErr)
+	if runErr != nil {
+		return joinErrors(runErr, finishErr)
+	}
+	return finishErr
+}
+
+func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
+	client, err := llm.NewClientFromConfig(opts.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	if opts.MaxTokens > 0 {
+		client.MaxTokens = opts.MaxTokens
+	}
+
+	registry := tools.NewRegistry()
+	registerCoreTools(registry, opts.SkillsDir)
+
+	cfgPath := strings.TrimSpace(opts.MCPConfigPath)
+	if cfgPath == "" {
+		cfgPath = "mcp.json"
+	}
+	mcpRuntime := mcpclient.NewRuntime(cfgPath)
 	registeredMCPToolNames := make([]string, 0)
+
 	reloadMCPInternal := func(ctx context.Context) (mcpclient.ReloadReport, error) {
 		report, err := mcpRuntime.Reload(ctx)
 		if err != nil {
@@ -113,15 +239,67 @@ func runChat(args []string) error {
 		fmt.Fprintln(os.Stderr, "warning:", report.String())
 	}
 
-	ag, err := agent.New(client, registry, *skillsDir)
+	coord := multiagent.NewCoordinator(opts.MultiAgentRoot)
+	executable, err := os.Executable()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	ag.Temperature = float32(*temperature)
-	ag.MCPReload = reloadMCP
+	workDir, _ := os.Getwd()
 
-	fmt.Println("Agent ready. Type /mcp reload to refresh MCP servers, or /exit to quit.")
-	return ag.RunInteractive(context.Background(), os.Stdin, os.Stdout)
+	registry.Register(&tools.AgentRunCreateTool{Coordinator: coord})
+	registry.Register(&tools.AgentSpawnTool{
+		Coordinator:        coord,
+		Executable:         executable,
+		SkillsDir:          opts.SkillsDir,
+		ConfigPath:         opts.ConfigPath,
+		MCPConfigPath:      opts.MCPConfigPath,
+		DefaultTemperature: opts.Temperature,
+		DefaultMaxTokens:   opts.MaxTokens,
+		WorkDir:            workDir,
+	})
+	registry.Register(&tools.AgentStateTool{Coordinator: coord})
+	registry.Register(&tools.AgentWaitTool{Coordinator: coord})
+	registry.Register(&tools.AgentControlTool{Coordinator: coord})
+	registry.Register(&tools.AgentEventsTool{Coordinator: coord})
+	registry.Register(&tools.AgentResultTool{Coordinator: coord})
+	registry.Register(&tools.AgentSignalSendTool{Coordinator: coord})
+	registry.Register(&tools.AgentSignalWaitTool{Coordinator: coord})
+
+	return &agentRuntime{
+		Client:    client,
+		Registry:  registry,
+		ReloadMCP: reloadMCP,
+		closeFn: func() error {
+			return mcpRuntime.Close()
+		},
+	}, nil
+}
+
+func registerCoreTools(registry *tools.Registry, skillsDir string) {
+	registry.Register(&tools.ListFilesTool{})
+	registry.Register(&tools.SearchTool{})
+	registry.Register(&tools.ReadFileTool{})
+	registry.Register(&tools.WriteFileTool{})
+	registry.Register(&tools.EditFileTool{})
+	registry.Register(&tools.MoveFileTool{})
+	registry.Register(&tools.CopyFileTool{})
+	registry.Register(&tools.DeleteFileTool{})
+	registry.Register(&tools.ExecCommandTool{})
+
+	registry.Register(&tools.SkillListTool{SkillsDir: skillsDir})
+	registry.Register(&tools.SkillLoadTool{SkillsDir: skillsDir})
+	registry.Register(&tools.SkillCreateTool{SkillsDir: skillsDir})
+	registry.Register(&tools.SkillInstallTool{SkillsDir: skillsDir})
+}
+
+func joinErrors(primary error, secondary error) error {
+	if primary == nil {
+		return secondary
+	}
+	if secondary == nil {
+		return primary
+	}
+	return fmt.Errorf("%v; %v", primary, secondary)
 }
 
 func runSkills(args []string) error {
