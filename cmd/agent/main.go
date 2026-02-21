@@ -255,7 +255,7 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	}
 
 	registry := tools.NewRegistry()
-	registerCoreTools(registry, opts.SkillsDir)
+	registerCoreTools(registry, opts.SkillsDir, opts.ConfigPath)
 
 	cfgPath := strings.TrimSpace(opts.MCPConfigPath)
 	if cfgPath == "" {
@@ -331,7 +331,7 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	}, nil
 }
 
-func registerCoreTools(registry *tools.Registry, skillsDir string) {
+func registerCoreTools(registry *tools.Registry, skillsDir string, configPath string) {
 	registry.Register(&tools.ListFilesTool{})
 	registry.Register(&tools.SearchTool{})
 	registry.Register(&tools.ReadFileTool{})
@@ -341,6 +341,9 @@ func registerCoreTools(registry *tools.Registry, skillsDir string) {
 	registry.Register(&tools.CopyFileTool{})
 	registry.Register(&tools.DeleteFileTool{})
 	registry.Register(&tools.ExecCommandTool{})
+	registry.Register(&tools.TavilySearchTool{ConfigPath: configPath})
+	registry.Register(&tools.TavilyExtractTool{ConfigPath: configPath})
+	registry.Register(&tools.TavilyCrawlTool{ConfigPath: configPath})
 
 	registry.Register(&tools.SkillListTool{SkillsDir: skillsDir})
 	registry.Register(&tools.SkillLoadTool{SkillsDir: skillsDir})

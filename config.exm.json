@@ -1,5 +1,6 @@
 {
   "api_key": "sk-3b7dd428d530441797a87ff41bf98258",
+  "tavily_api_key": "tvly-REPLACE_ME",
   "base_url": "https://api.deepseek.com",
   "model": "deepseek-chat",
   "max_tokens": 0,

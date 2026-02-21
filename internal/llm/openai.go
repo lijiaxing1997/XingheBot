@@ -83,10 +83,11 @@ type Client struct {
 }
 
 type Config struct {
-	APIKey    string `json:"api_key"`
-	BaseURL   string `json:"base_url"`
-	Model     string `json:"model"`
-	MaxTokens int    `json:"max_tokens"`
+	APIKey       string `json:"api_key"`
+	TavilyAPIKey string `json:"tavily_api_key"`
+	BaseURL      string `json:"base_url"`
+	Model        string `json:"model"`
+	MaxTokens    int    `json:"max_tokens"`
 }
 
 func NewClientFromEnv() (*Client, error) {
