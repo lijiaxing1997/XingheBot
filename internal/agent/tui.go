@@ -31,6 +31,8 @@ const (
 	tuiHistoryFileName         = "history.jsonl"
 )
 
+var tuiSpinnerFrames = []string{"|", "/", "-", "\\"}
+
 type TUIMode string
 
 const (
@@ -67,22 +69,15 @@ func (a *Agent) RunInteractiveTUI(ctx context.Context, in io.Reader, out io.Writ
 	return err
 }
 
-type tuiFocusMode int
-
-const (
-	tuiFocusInput tuiFocusMode = iota
-	tuiFocusBrowse
-)
-
 type tuiModel struct {
 	ctx   context.Context
 	agent *Agent
 	coord *multiagent.Coordinator
 
+	events chan tuiAsyncMsg
+
 	width  int
 	height int
-
-	focus tuiFocusMode
 
 	sessions     []multiagent.RunManifest
 	sessionIndex int
@@ -95,10 +90,11 @@ type tuiModel struct {
 	input    textinput.Model
 	viewport viewport.Model
 
-	toolKeys       []string
-	toolLineOffset []int
-	toolCursor     int
-	expandedTools  map[string]bool
+	expandedTools map[string]bool
+	lineToolKeys  []string
+	cursorLine    int
+	stickToBottom bool
+	spinnerFrame  int
 
 	loading bool
 	busy    bool
@@ -110,7 +106,6 @@ type tuiSessionData struct {
 	RunID       string
 	HistoryPath string
 	History     []llm.Message
-	Busy        bool
 }
 
 type tuiInitMsg struct{}
@@ -131,10 +126,21 @@ type tuiSessionCreatedMsg struct {
 	Err error
 }
 
-type tuiTurnResultMsg struct {
-	RunID    string
-	Messages []llm.Message
-	Err      error
+type tuiAsyncMsg struct {
+	Event tea.Msg
+}
+
+type tuiAppendHistoryMsg struct {
+	RunID string
+	Msg   llm.Message
+}
+
+type tuiSetBusyMsg struct {
+	Busy bool
+}
+
+type tuiSetNoticeMsg struct {
+	Text string
 }
 
 func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator) tuiModel {
@@ -151,12 +157,13 @@ func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator) t
 		ctx:           ctx,
 		agent:         a,
 		coord:         coord,
-		focus:         tuiFocusInput,
+		events:        make(chan tuiAsyncMsg, 512),
 		input:         inp,
 		viewport:      vp,
 		sessionData:   make(map[string]*tuiSessionData),
 		expandedTools: make(map[string]bool),
-		toolCursor:    -1,
+		cursorLine:    -1,
+		stickToBottom: true,
 	}
 }
 
@@ -165,11 +172,18 @@ func (m tuiModel) Init() tea.Cmd {
 		func() tea.Msg { return tuiInitMsg{} },
 		tuiLoadSessionsCmd(m.coord),
 		tuiTickCmd(),
+		waitAsyncCmd(m.events),
 	)
 }
 
 func tuiTickCmd() tea.Cmd {
-	return tea.Tick(600*time.Millisecond, func(time.Time) tea.Msg { return tuiRefreshMsg{} })
+	return tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg { return tuiRefreshMsg{} })
+}
+
+func waitAsyncCmd(ch <-chan tuiAsyncMsg) tea.Cmd {
+	return func() tea.Msg {
+		return <-ch
+	}
 }
 
 func tuiLoadSessionsCmd(coord *multiagent.Coordinator) tea.Cmd {
@@ -186,32 +200,6 @@ func tuiCreateSessionCmd(coord *multiagent.Coordinator) tea.Cmd {
 	}
 }
 
-func tuiMCPReloadCmd(ctx context.Context, a *Agent, runID string) tea.Cmd {
-	return func() tea.Msg {
-		msg, err := a.reloadMCP(ctx)
-		content := msg
-		if err != nil {
-			content = "MCP reload failed: " + err.Error()
-		} else if strings.TrimSpace(content) == "" {
-			content = "mcp reload complete"
-		}
-		return tuiTurnResultMsg{
-			RunID: runID,
-			Messages: []llm.Message{
-				{Role: "system", Content: content},
-			},
-			Err: err,
-		}
-	}
-}
-
-func tuiRunTurnCmd(ctx context.Context, a *Agent, runID string, userText string, baseHistory []llm.Message) tea.Cmd {
-	return func() tea.Msg {
-		msgs, err := runTUITurn(ctx, a, runID, userText, baseHistory)
-		return tuiTurnResultMsg{RunID: runID, Messages: msgs, Err: err}
-	}
-}
-
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -220,6 +208,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resize()
 		m.rerender()
 		return m, nil
+	case tuiAsyncMsg:
+		m.handleAsyncEvent(msg.Event)
+		m.rerender()
+		return m, waitAsyncCmd(m.events)
 	case tuiInitMsg:
 		m.loading = true
 		return m, nil
@@ -250,13 +242,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.ensureSessionLoaded(m.currentRunID())
-		m.ensurePrimaryAgent(m.currentRunID())
+		m.createPrimaryAgent(m.currentRunID())
 		m.refreshAgentIDs()
 		m.rerender()
 		return m, nil
 	case tuiRefreshMsg:
 		if m.currentRunID() == "" {
 			return m, tuiTickCmd()
+		}
+		if len(tuiSpinnerFrames) > 0 {
+			m.spinnerFrame = (m.spinnerFrame + 1) % len(tuiSpinnerFrames)
 		}
 		m.refreshAgentIDs()
 		m.rerender()
@@ -269,7 +264,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessions = append([]multiagent.RunManifest{msg.Run}, m.sessions...)
 		m.sessionIndex = 0
 		m.ensureSessionLoaded(m.currentRunID())
-		m.ensurePrimaryAgent(m.currentRunID())
+		m.createPrimaryAgent(m.currentRunID())
 		m.refreshAgentIDs()
 		m.notice = ""
 		m.rerender()
@@ -282,47 +277,43 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if run.ID == msg.RunID {
 				m.sessionIndex = i
 				m.ensureSessionLoaded(msg.RunID)
-				m.ensurePrimaryAgent(msg.RunID)
+				m.createPrimaryAgent(msg.RunID)
 				m.refreshAgentIDs()
 				m.rerender()
 				break
 			}
 		}
 		return m, nil
-	case tuiTurnResultMsg:
-		m.ensureSessionLoaded(msg.RunID)
-		sess := m.sessionData[msg.RunID]
-		for _, item := range msg.Messages {
-			sess.History = append(sess.History, item)
-			_ = appendJSONL(sess.HistoryPath, item)
-		}
-		m.busy = false
-		sess.Busy = false
-		if msg.Err != nil {
-			m.notice = msg.Err.Error()
-		} else {
-			m.notice = ""
-		}
-		m.rerender()
-		return m, nil
 	case tea.KeyMsg:
 		handled, cmd := m.handleKey(msg)
 		if handled {
 			return m, cmd
 		}
-		if m.focus == tuiFocusBrowse {
-			var cmd tea.Cmd
-			m.viewport, cmd = m.viewport.Update(msg)
-			return m, cmd
+		if m.busy {
+			return m, nil
 		}
-		if m.focus == tuiFocusInput && !m.busy {
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			return m, cmd
-		}
-		return m, nil
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
 	default:
 		return m, nil
+	}
+}
+
+func (m *tuiModel) handleAsyncEvent(evt tea.Msg) {
+	switch msg := evt.(type) {
+	case tuiAppendHistoryMsg:
+		m.ensureSessionLoaded(msg.RunID)
+		sess := m.sessionData[msg.RunID]
+		sess.History = append(sess.History, msg.Msg)
+		_ = appendJSONL(sess.HistoryPath, msg.Msg)
+		if msg.RunID == m.currentRunID() && m.stickToBottom {
+			m.cursorLine = -1
+		}
+	case tuiSetBusyMsg:
+		m.busy = msg.Busy
+	case tuiSetNoticeMsg:
+		m.notice = strings.TrimSpace(msg.Text)
+	default:
 	}
 }
 
@@ -335,19 +326,12 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		return true, tuiLoadSessionsCmd(m.coord)
 	case "ctrl+n":
 		return true, tuiCreateSessionCmd(m.coord)
-	case "esc":
-		if m.focus == tuiFocusInput {
-			m.focus = tuiFocusBrowse
-		} else {
-			m.focus = tuiFocusInput
-		}
-		m.rerender()
-		return true, nil
 	case "tab":
 		if len(m.agentIDs) > 0 {
 			m.agentIndex = (m.agentIndex + 1) % len(m.agentIDs)
 		}
-		m.toolCursor = 0
+		m.cursorLine = -1
+		m.stickToBottom = true
 		m.rerender()
 		return true, nil
 	case "shift+up", "alt+up":
@@ -357,29 +341,28 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.selectSession(1)
 		return true, nil
 	case "up", "k":
-		if m.focus == tuiFocusBrowse {
-			m.moveToolCursor(-1)
-			return true, nil
-		}
-	case "down", "j":
-		if m.focus == tuiFocusBrowse {
-			m.moveToolCursor(1)
-			return true, nil
-		}
-	case "enter":
-		if m.focus == tuiFocusBrowse {
-			m.toggleTool()
-			return true, nil
-		}
-		if m.focus == tuiFocusInput {
-			cmd := m.submitInput()
-			return true, cmd
-		}
-	case "pgup":
-		m.viewport.PageUp()
+		m.moveCursor(-1)
 		return true, nil
-	case "pgdown":
-		m.viewport.PageDown()
+	case "down", "j":
+		m.moveCursor(1)
+		return true, nil
+	case "left", "pgup":
+		m.pageCursor(-1)
+		return true, nil
+	case "right", "pgdown":
+		m.pageCursor(1)
+		return true, nil
+	case "enter":
+		if strings.TrimSpace(m.input.Value()) == "" {
+			m.toggleToolAtCursor()
+			return true, nil
+		}
+		cmd := m.submitInput()
+		return true, cmd
+	case "ctrl+l":
+		m.stickToBottom = true
+		m.cursorLine = -1
+		m.rerender()
 		return true, nil
 	}
 	return false, nil
@@ -537,38 +520,55 @@ func (m *tuiModel) selectSession(delta int) {
 	}
 	m.sessionIndex = next
 	m.ensureSessionLoaded(m.currentRunID())
-	m.ensurePrimaryAgent(m.currentRunID())
+	m.createPrimaryAgent(m.currentRunID())
 	m.refreshAgentIDs()
-	m.toolCursor = 0
+	m.cursorLine = -1
+	m.stickToBottom = true
 	m.rerender()
 }
 
-func (m *tuiModel) moveToolCursor(delta int) {
-	if len(m.toolKeys) == 0 || delta == 0 {
-		m.toolCursor = -1
+func (m *tuiModel) moveCursor(delta int) {
+	total := len(m.lineToolKeys)
+	if total == 0 || delta == 0 {
+		m.cursorLine = -1
 		return
 	}
-	if m.toolCursor < 0 {
-		m.toolCursor = 0
+	if m.cursorLine < 0 {
+		m.cursorLine = 0
 	}
-	next := m.toolCursor + delta
-	for next < 0 {
-		next += len(m.toolKeys)
+	next := m.cursorLine + delta
+	if next < 0 {
+		next = 0
 	}
-	next = next % len(m.toolKeys)
-	m.toolCursor = next
+	if next >= total {
+		next = total - 1
+	}
+	m.cursorLine = next
+	m.stickToBottom = m.cursorLine >= total-1
 	m.rerender()
 }
 
-func (m *tuiModel) toggleTool() {
-	if m.toolCursor < 0 || m.toolCursor >= len(m.toolKeys) {
+func (m *tuiModel) pageCursor(deltaPages int) {
+	if deltaPages == 0 {
 		return
 	}
-	key := m.toolKeys[m.toolCursor]
+	step := m.viewport.Height
+	if step <= 0 {
+		step = 10
+	}
+	m.moveCursor(deltaPages * step)
+}
+
+func (m *tuiModel) toggleToolAtCursor() {
+	if m.cursorLine < 0 || m.cursorLine >= len(m.lineToolKeys) {
+		return
+	}
+	key := strings.TrimSpace(m.lineToolKeys[m.cursorLine])
 	if key == "" {
 		return
 	}
 	m.expandedTools[key] = !m.expandedTools[key]
+	m.stickToBottom = false
 	m.rerender()
 }
 
@@ -591,17 +591,21 @@ func (m *tuiModel) submitInput() tea.Cmd {
 		return tea.Quit
 	case "/mcp reload", "/mcp-reload":
 		m.busy = true
-		m.ensureSessionLoaded(runID)
-		m.sessionData[runID].Busy = true
+		m.notice = ""
+		m.stickToBottom = true
+		m.cursorLine = -1
 		m.rerender()
-		return tuiMCPReloadCmd(m.ctx, m.agent, runID)
+		go m.runMCPReload(runID)
+		return nil
 	}
 	if m.agent.shouldTriggerNaturalLanguageMCPReload(text) {
 		m.busy = true
-		m.ensureSessionLoaded(runID)
-		m.sessionData[runID].Busy = true
+		m.notice = ""
+		m.stickToBottom = true
+		m.cursorLine = -1
 		m.rerender()
-		return tuiMCPReloadCmd(m.ctx, m.agent, runID)
+		go m.runMCPReload(runID)
+		return nil
 	}
 
 	m.ensureSessionLoaded(runID)
@@ -613,23 +617,72 @@ func (m *tuiModel) submitInput() tea.Cmd {
 	sess.History = append(sess.History, userMsg)
 	_ = appendJSONL(sess.HistoryPath, userMsg)
 
-	sess.Busy = true
 	m.busy = true
 	m.notice = ""
+	m.stickToBottom = true
+	m.cursorLine = -1
 	m.rerender()
-	return tuiRunTurnCmd(m.ctx, m.agent, runID, text, base)
+	go m.runTurn(runID, text, base)
+	return nil
 }
 
-func runTUITurn(ctx context.Context, a *Agent, runID string, userText string, baseHistory []llm.Message) ([]llm.Message, error) {
+func (m *tuiModel) runMCPReload(runID string) {
+	events := m.events
+	agentRef := m.agent
+	ctx := m.ctx
+
+	defer func() {
+		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{Busy: false}}
+	}()
+
+	msg, err := agentRef.reloadMCP(ctx)
+	content := msg
+	if err != nil {
+		content = "MCP reload failed: " + err.Error()
+	}
+	events <- tuiAsyncMsg{Event: tuiAppendHistoryMsg{
+		RunID: runID,
+		Msg:   llm.Message{Role: "system", Content: content},
+	}}
+	if err != nil {
+		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
+	}
+}
+
+func (m *tuiModel) runTurn(runID string, userText string, baseHistory []llm.Message) {
+	events := m.events
+	agentRef := m.agent
+	ctx := m.ctx
+
+	defer func() {
+		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{Busy: false}}
+	}()
+
+	emit := func(msg llm.Message) {
+		events <- tuiAsyncMsg{Event: tuiAppendHistoryMsg{
+			RunID: runID,
+			Msg:   msg,
+		}}
+	}
+
+	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit); err != nil {
+		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
+	}
+}
+
+func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText string, baseHistory []llm.Message, emit func(llm.Message)) error {
 	if a == nil || a.Client == nil {
-		return nil, errors.New("agent is not configured")
+		return errors.New("agent is not configured")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	userText = strings.TrimSpace(userText)
 	if userText == "" {
-		return nil, nil
+		return nil
+	}
+	if emit == nil {
+		emit = func(llm.Message) {}
 	}
 
 	systemMsg := llm.Message{Role: "system", Content: a.SystemPrompt}
@@ -668,7 +721,7 @@ func runTUITurn(ctx context.Context, a *Agent, runID string, userText string, ba
 			Temperature: a.Temperature,
 		})
 		if err != nil {
-			return nil, err
+			return err
 		}
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) > 0 {
@@ -680,6 +733,7 @@ func runTUITurn(ctx context.Context, a *Agent, runID string, userText string, ba
 				)
 			}
 		}
+		emit(msg)
 		turnHistory = append(turnHistory, msg)
 		reqMessages = append(reqMessages, msg)
 
@@ -701,6 +755,7 @@ func runTUITurn(ctx context.Context, a *Agent, runID string, userText string, ba
 			if callErr != nil {
 				toolMsg.Content = "ERROR: " + callErr.Error()
 			}
+			emit(toolMsg)
 			turnHistory = append(turnHistory, toolMsg)
 			reqMessages = append(reqMessages, toolMsg)
 
@@ -726,17 +781,14 @@ func runTUITurn(ctx context.Context, a *Agent, runID string, userText string, ba
 			}
 			if strings.TrimSpace(contextMsg) != "" {
 				autoMsg := llm.Message{Role: "system", Content: contextMsg}
+				emit(autoMsg)
 				turnHistory = append(turnHistory, autoMsg)
 				reqMessages = append(reqMessages, autoMsg)
 			}
 		}
 	}
 
-	// Exclude the user message (already appended by the UI) from the returned messages.
-	if len(turnHistory) <= 1 {
-		return nil, nil
-	}
-	return append([]llm.Message(nil), turnHistory[1:]...), nil
+	return nil
 }
 
 func injectRunIDForTool(toolName string, rawArgs string, runID string) string {
@@ -786,78 +838,103 @@ func (m *tuiModel) rerender() {
 	runID := m.currentRunID()
 	if runID == "" {
 		m.viewport.SetContent("")
+		m.viewport.SetYOffset(0)
+		m.lineToolKeys = nil
+		m.cursorLine = -1
 		return
 	}
-	m.toolKeys = m.toolKeys[:0]
-	m.toolLineOffset = m.toolLineOffset[:0]
 
-	contentW := m.viewport.Width
-	if contentW <= 0 {
-		contentW = 80
+	width := m.viewport.Width
+	if width <= 0 {
+		width = 80
 	}
-	items, toolKeys, toolOffsets := m.buildCenterContent(runID, m.currentAgentID(), contentW)
-	m.toolKeys = toolKeys
-	m.toolLineOffset = toolOffsets
-	if m.toolCursor >= len(m.toolKeys) {
-		m.toolCursor = len(m.toolKeys) - 1
-	}
-	if m.toolCursor < 0 && len(m.toolKeys) > 0 {
-		m.toolCursor = 0
-	}
+	contentWidth := max(10, width-2)
 
-	m.viewport.SetContent(items)
-	m.scrollToToolCursor()
-}
-
-func (m *tuiModel) scrollToToolCursor() {
-	if m.toolCursor < 0 || m.toolCursor >= len(m.toolLineOffset) {
+	lines := m.buildConversationLines(runID, m.currentAgentID(), contentWidth)
+	m.lineToolKeys = make([]string, len(lines))
+	if len(lines) == 0 {
+		m.cursorLine = -1
+		m.viewport.SetContent("")
+		m.viewport.SetYOffset(0)
 		return
 	}
-	line := m.toolLineOffset[m.toolCursor]
-	target := max(0, line-m.viewport.Height/3)
-	m.viewport.SetYOffset(target)
+
+	if m.stickToBottom {
+		m.cursorLine = len(lines) - 1
+	}
+	if m.cursorLine < 0 {
+		m.cursorLine = 0
+	}
+	if m.cursorLine >= len(lines) {
+		m.cursorLine = len(lines) - 1
+	}
+	if m.cursorLine >= len(lines)-1 {
+		m.stickToBottom = true
+	}
+
+	rendered := make([]string, 0, len(lines))
+	for i, line := range lines {
+		m.lineToolKeys[i] = strings.TrimSpace(line.ToolKey)
+		arrow := " "
+		if i == m.cursorLine {
+			arrow = ">"
+		}
+		rendered = append(rendered, arrow+" "+truncateANSI(line.Text, contentWidth))
+	}
+
+	m.viewport.SetContent(strings.Join(rendered, "\n"))
+	m.adjustViewportForCursor(len(lines))
 }
 
-func (m *tuiModel) buildCenterContent(runID string, agentID string, width int) (content string, toolKeys []string, toolOffsets []int) {
-	var lines []string
-	appendLine := func(s string) {
-		lines = append(lines, s)
+func (m *tuiModel) adjustViewportForCursor(totalLines int) {
+	if totalLines <= 0 || m.viewport.Height <= 0 {
+		m.viewport.SetYOffset(0)
+		return
+	}
+	maxYOffset := max(0, totalLines-m.viewport.Height)
+	if m.stickToBottom {
+		m.viewport.SetYOffset(maxYOffset)
+		return
 	}
 
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	appendLine(headerStyle.Render(fmt.Sprintf("Session %s", runID)))
-
-	agentLabel := agentID
-	if agentLabel == tuiPrimaryAgentID {
-		agentLabel = "primary"
+	y := m.viewport.YOffset
+	if m.cursorLine < y {
+		y = m.cursorLine
+	} else if m.cursorLine >= y+m.viewport.Height {
+		y = m.cursorLine - m.viewport.Height + 1
 	}
-	appendLine(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(fmt.Sprintf("Agent %s (TAB switch, Shift+↑/↓ sessions, ESC browse, Enter toggle, Ctrl+C quit)", agentLabel)))
-	appendLine("")
+	y = clamp(0, y, maxYOffset)
+	m.viewport.SetYOffset(y)
+}
 
+func (m *tuiModel) spinner() string {
+	if len(tuiSpinnerFrames) == 0 {
+		return ""
+	}
+	return tuiSpinnerFrames[m.spinnerFrame%len(tuiSpinnerFrames)]
+}
+
+type tuiLine struct {
+	Text    string
+	ToolKey string
+}
+
+func (m *tuiModel) buildConversationLines(runID string, agentID string, width int) []tuiLine {
+	if runID == "" {
+		return nil
+	}
 	if agentID == tuiPrimaryAgentID {
+		m.ensureSessionLoaded(runID)
 		sess := m.sessionData[runID]
 		if sess == nil {
-			return strings.Join(lines, "\n"), nil, nil
+			return nil
 		}
-		base := len(lines)
-		chatLines, keys, offsets := renderPrimaryHistory(runID, agentID, sess.History, width, m.expandedTools, m.toolCursor)
-		lines = append(lines, chatLines...)
-		for i := range offsets {
-			offsets[i] += base
-		}
-		return strings.Join(lines, "\n"), keys, offsets
+		return buildPrimaryLines(runID, agentID, sess.History, width, m.expandedTools, m.spinner())
 	}
-
-	base := len(lines)
-	subLines, keys, offsets := m.renderSubagent(runID, agentID, width)
-	lines = append(lines, subLines...)
-	for i := range offsets {
-		offsets[i] += base
-	}
-	return strings.Join(lines, "\n"), keys, offsets
+	return m.buildSubagentLines(runID, agentID, width)
 }
 
-func renderPrimaryHistory(runID string, agentID string, history []llm.Message, width int, expanded map[string]bool, cursor int) (lines []string, toolKeys []string, toolOffsets []int) {
+func buildPrimaryLines(runID string, agentID string, history []llm.Message, width int, expanded map[string]bool, spinner string) []tuiLine {
 	if width <= 0 {
 		width = 80
 	}
@@ -866,11 +943,8 @@ func renderPrimaryHistory(runID string, agentID string, history []llm.Message, w
 	assistantStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
 	systemStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
 
-	var out []string
-	var toolLineOffsets []int
-	var keys []string
-
 	toolResults := make(map[string]string, 32)
+	toolSeen := make(map[string]bool, 32)
 	for _, msg := range history {
 		if strings.EqualFold(strings.TrimSpace(msg.Role), "tool") {
 			id := strings.TrimSpace(msg.ToolCallID)
@@ -878,21 +952,17 @@ func renderPrimaryHistory(runID string, agentID string, history []llm.Message, w
 				continue
 			}
 			toolResults[id] = msg.Content
+			toolSeen[id] = true
 		}
 	}
 
+	out := make([]tuiLine, 0, max(64, len(history)*2))
 	addWrapped := func(prefix string, style lipgloss.Style, text string) {
-		text = strings.TrimRight(text, "\n")
-		if strings.TrimSpace(text) == "" {
-			return
-		}
-		wrapped := wrapText(text, max(10, width-len(prefix)))
-		for i, line := range strings.Split(wrapped, "\n") {
-			if i == 0 {
-				out = append(out, style.Render(prefix+line))
-			} else {
-				out = append(out, style.Render(strings.Repeat(" ", len(prefix))+line))
-			}
+		out = append(out, wrapPrefixedLines(prefix, style, text, width)...)
+	}
+	addBlank := func() {
+		if len(out) == 0 || strings.TrimSpace(out[len(out)-1].Text) != "" {
+			out = append(out, tuiLine{Text: ""})
 		}
 	}
 
@@ -900,13 +970,16 @@ func renderPrimaryHistory(runID string, agentID string, history []llm.Message, w
 		switch strings.ToLower(strings.TrimSpace(msg.Role)) {
 		case "user":
 			addWrapped("You: ", userStyle, msg.Content)
-			out = append(out, "")
+			addBlank()
 		case "assistant":
+			hadContent := false
 			if strings.TrimSpace(msg.Content) != "" {
 				addWrapped("AI:  ", assistantStyle, msg.Content)
-				out = append(out, "")
+				hadContent = true
 			}
+			hadToolCalls := false
 			for _, call := range msg.ToolCalls {
+				hadToolCalls = true
 				uiKey := toolUIKey(runID, agentID, call.ID)
 				tv := &toolView{
 					Key:       uiKey,
@@ -914,26 +987,108 @@ func renderPrimaryHistory(runID string, agentID string, history []llm.Message, w
 					Arguments: call.Function.Arguments,
 					Result:    toolResults[call.ID],
 				}
-				if strings.TrimSpace(tv.Result) != "" {
+				if toolSeen[call.ID] {
 					tv.Status = "ok"
 					if strings.HasPrefix(strings.TrimSpace(tv.Result), "ERROR:") {
 						tv.Status = "error"
 					}
 				}
-				keys = append(keys, uiKey)
-				toolLineOffsets = append(toolLineOffsets, len(out))
-				out = append(out, renderToolLine(tv, width, expanded, cursor, len(keys)-1))
-				if expanded[uiKey] {
+				isExpanded := expanded != nil && expanded[uiKey]
+				out = append(out, tuiLine{
+					Text:    renderToolLine(tv, width, isExpanded, spinner),
+					ToolKey: uiKey,
+				})
+				if isExpanded {
 					out = append(out, renderToolDetails(tv, width)...)
 				}
 			}
+			if hadContent || hadToolCalls {
+				addBlank()
+			}
 		case "system":
 			addWrapped("SYS: ", systemStyle, msg.Content)
-			out = append(out, "")
+			addBlank()
 		}
 	}
 
-	return out, keys, toolLineOffsets
+	return out
+}
+
+func wrapPrefixedLines(prefix string, style lipgloss.Style, text string, width int) []tuiLine {
+	text = strings.TrimRight(text, "\n")
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	prefixWidth := runewidth.StringWidth(prefix)
+	contentWidth := max(10, width-prefixWidth)
+	wrapped := wrapText(text, contentWidth)
+
+	lines := strings.Split(wrapped, "\n")
+	out := make([]tuiLine, 0, len(lines))
+	indent := strings.Repeat(" ", len(prefix))
+	for i, line := range lines {
+		if i == 0 {
+			out = append(out, tuiLine{Text: style.Render(prefix + line)})
+			continue
+		}
+		out = append(out, tuiLine{Text: style.Render(indent + line)})
+	}
+	return out
+}
+
+func (m *tuiModel) buildSubagentLines(runID string, agentID string, width int) []tuiLine {
+	spec, _ := m.coord.ReadAgentSpec(runID, agentID)
+	state, _ := m.coord.ReadAgentState(runID, agentID)
+	events, _ := multiagent.TailJSONL[multiagent.AgentEvent](m.coord.AgentEventsPath(runID, agentID), 240, 256*1024)
+	result, _ := m.coord.ReadResult(runID, agentID)
+
+	out := make([]tuiLine, 0, 256)
+	heading := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	out = append(out, tuiLine{Text: heading.Render(fmt.Sprintf("%s [%s]", agentID, strings.TrimSpace(state.Status)))})
+
+	if strings.TrimSpace(spec.Task) != "" {
+		appendBlockLines(&out, wrapText("Task: "+spec.Task, width))
+		out = append(out, tuiLine{Text: ""})
+	}
+
+	tools := subagentToolViews(events)
+	for _, tv := range tools {
+		uiKey := toolUIKey(runID, agentID, tv.Key)
+		tv.Key = uiKey
+		isExpanded := m.expandedTools != nil && m.expandedTools[uiKey]
+		out = append(out, tuiLine{
+			Text:    renderToolLine(tv, width, isExpanded, m.spinner()),
+			ToolKey: uiKey,
+		})
+		if isExpanded {
+			out = append(out, renderToolDetails(tv, width)...)
+		}
+	}
+
+	if strings.TrimSpace(result.Output) != "" || strings.TrimSpace(result.Error) != "" {
+		out = append(out, tuiLine{Text: ""})
+		out = append(out, tuiLine{Text: heading.Render("Final Output")})
+		if strings.TrimSpace(result.Output) != "" {
+			appendBlockLines(&out, wrapText(result.Output, width))
+		}
+		if strings.TrimSpace(result.Error) != "" {
+			red := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+			for _, line := range strings.Split(wrapText("Error: "+result.Error, width), "\n") {
+				out = append(out, tuiLine{Text: red.Render(line)})
+			}
+		}
+	}
+
+	return out
+}
+
+func appendBlockLines(dst *[]tuiLine, block string) {
+	if dst == nil || block == "" {
+		return
+	}
+	for _, line := range strings.Split(block, "\n") {
+		*dst = append(*dst, tuiLine{Text: line})
+	}
 }
 
 type toolView struct {
@@ -947,130 +1102,204 @@ type toolView struct {
 	Error      string
 }
 
-func renderToolLine(tv *toolView, width int, expanded map[string]bool, cursor int, toolIndex int) string {
+func renderToolLine(tv *toolView, width int, expanded bool, spinner string) string {
 	if tv == nil {
 		return ""
 	}
-	prefix := "  "
-	arrow := " "
-	if toolIndex == cursor {
-		arrow = ">"
+
+	toolStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	summaryStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	disclosure := "▸"
+	if expanded {
+		disclosure = "▾"
 	}
-	if strings.TrimSpace(tv.Status) == "" && strings.TrimSpace(tv.Result) != "" {
-		tv.Status = "ok"
-	}
+
 	status := strings.ToLower(strings.TrimSpace(tv.Status))
-	if status == "" && strings.TrimSpace(tv.Result) == "" {
-		status = "running"
+	if status == "" {
+		switch {
+		case strings.TrimSpace(tv.Error) != "" || strings.HasPrefix(strings.TrimSpace(tv.Result), "ERROR:"):
+			status = "error"
+		case strings.TrimSpace(tv.Result) != "":
+			status = "ok"
+		default:
+			status = "running"
+		}
 	}
+
 	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	switch status {
 	case "ok", "completed", "success":
 		statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	case "error", "failed":
 		statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	case "running":
+		statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	}
 
-	argHint := ""
-	if trimmed := strings.TrimSpace(tv.Arguments); trimmed != "" {
-		if json.Valid([]byte(trimmed)) {
-			if keys := topLevelJSONKeys(trimmed); keys != "" {
-				argHint = "{" + keys + "}"
-			}
+	argsSummary := summarizeToolArgs(tv.Arguments)
+	resultSummary := ""
+	if status == "running" {
+		if strings.TrimSpace(spinner) != "" {
+			resultSummary = spinner
 		} else {
-			argHint = fmt.Sprintf("args_bytes=%d", len(trimmed))
+			resultSummary = "…"
 		}
-	}
-	resultHint := ""
-	if trimmed := strings.TrimSpace(tv.Result); trimmed != "" {
-		if parsed, ok := parseMCPResult(trimmed); ok {
-			if parsed.Text != "" {
-				resultHint = safeOneLine(parsed.Text, 80)
-			} else if parsed.Structured != "" {
-				resultHint = "structured"
-			} else if parsed.RawJSON != "" {
-				resultHint = "json"
-			}
-		} else if strings.HasPrefix(strings.TrimSpace(trimmed), "ERROR:") {
-			resultHint = safeOneLine(strings.TrimSpace(trimmed), 120)
+	} else {
+		if strings.TrimSpace(tv.Error) != "" && strings.TrimSpace(tv.Result) == "" {
+			resultSummary = safeOneLine(tv.Error, 100)
 		} else {
-			resultHint = safeOneLine(trimmed, 100)
+			resultSummary = summarizeToolResult(tv.Result)
 		}
 	}
 
-	line := fmt.Sprintf("%s%s %s %s -> %s", prefix, arrow, tv.Name, argHint, statusStyle.Render(status))
-	if resultHint != "" {
-		line += " " + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(resultHint)
+	var b strings.Builder
+	b.WriteString(summaryStyle.Render(disclosure))
+	b.WriteString(" ")
+	b.WriteString(toolStyle.Render(strings.TrimSpace(tv.Name)))
+	if strings.TrimSpace(argsSummary) != "" {
+		b.WriteString(" ")
+		b.WriteString(summaryStyle.Render(argsSummary))
 	}
-	if expanded != nil && expanded[tv.Key] {
-		line += lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(" (expanded)")
+	b.WriteString(" -> ")
+	b.WriteString(statusStyle.Render(status))
+	if strings.TrimSpace(resultSummary) != "" {
+		b.WriteString(" ")
+		b.WriteString(summaryStyle.Render(resultSummary))
 	}
+	line := b.String()
 	return truncateANSI(line, width)
 }
 
-func renderToolDetails(tv *toolView, width int) []string {
+func renderToolDetails(tv *toolView, width int) []tuiLine {
 	if tv == nil {
 		return nil
 	}
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	lines := make([]string, 0, 16)
+	lines := make([]tuiLine, 0, 24)
 	if strings.TrimSpace(tv.Arguments) != "" {
-		lines = append(lines, dim.Render("    args:"))
+		lines = append(lines, tuiLine{Text: dim.Render("    args:")})
 		for _, line := range strings.Split(formatJSON(tv.Arguments), "\n") {
-			lines = append(lines, dim.Render("      "+truncateANSI(line, width-6)))
+			lines = append(lines, tuiLine{Text: dim.Render("      " + truncateANSI(line, width-6))})
 		}
 	}
-	if strings.TrimSpace(tv.Result) != "" {
-		lines = append(lines, dim.Render("    result:"))
-		for _, line := range strings.Split(strings.TrimRight(tv.Result, "\n"), "\n") {
-			lines = append(lines, dim.Render("      "+truncateANSI(line, width-6)))
+	resultText := strings.TrimRight(strings.TrimSpace(tv.Result), "\n")
+	if resultText == "" {
+		resultText = strings.TrimRight(strings.TrimSpace(tv.Error), "\n")
+	}
+	if resultText != "" {
+		lines = append(lines, tuiLine{Text: dim.Render("    result:")})
+		for _, line := range strings.Split(resultText, "\n") {
+			lines = append(lines, tuiLine{Text: dim.Render("      " + truncateANSI(line, width-6))})
 		}
 	}
 	if len(lines) > 0 {
-		lines = append(lines, "")
+		lines = append(lines, tuiLine{Text: ""})
 	}
 	return lines
 }
 
-func (m *tuiModel) renderSubagent(runID string, agentID string, width int) (lines []string, toolKeys []string, toolOffsets []int) {
-	spec, _ := m.coord.ReadAgentSpec(runID, agentID)
-	state, _ := m.coord.ReadAgentState(runID, agentID)
-	events, _ := multiagent.TailJSONL[multiagent.AgentEvent](m.coord.AgentEventsPath(runID, agentID), 200, 256*1024)
-	result, _ := m.coord.ReadResult(runID, agentID)
-
-	heading := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	lines = append(lines, heading.Render(fmt.Sprintf("%s [%s]", agentID, state.Status)))
-	if strings.TrimSpace(spec.Task) != "" {
-		appendBlock(&lines, wrapText("Task: "+spec.Task, width))
-		lines = append(lines, "")
+func summarizeToolArgs(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
 	}
+	if !json.Valid([]byte(trimmed)) {
+		return fmt.Sprintf("args=%dB", len(trimmed))
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
+		return fmt.Sprintf("args=%dB", len(trimmed))
+	}
+	if len(obj) == 0 {
+		return "{}"
+	}
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 
-	tools := subagentToolViews(events)
-	for i := range tools {
-		tv := tools[i]
-		tv.Key = toolUIKey(runID, agentID, tv.Key)
-		toolKeys = append(toolKeys, tv.Key)
-		toolOffsets = append(toolOffsets, len(lines))
-		lines = append(lines, renderToolLine(tv, width, m.expandedTools, m.toolCursor, len(toolKeys)-1))
-		if m.expandedTools[tv.Key] {
-			lines = append(lines, renderToolDetails(tv, width)...)
+	parts := make([]string, 0, min(3, len(keys)))
+	for _, k := range keys {
+		if isSensitiveKey(k) {
+			parts = append(parts, k+"=<redacted>")
+		} else {
+			parts = append(parts, k)
+		}
+		if len(parts) >= 3 {
+			break
 		}
 	}
+	more := ""
+	if len(keys) > len(parts) {
+		more = fmt.Sprintf(" +%d", len(keys)-len(parts))
+	}
+	return "{" + strings.Join(parts, ", ") + more + "}"
+}
 
-	if strings.TrimSpace(result.Output) != "" || strings.TrimSpace(result.Error) != "" {
-		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")).Render("Final Output"))
-		if strings.TrimSpace(result.Output) != "" {
-			appendBlock(&lines, wrapText(result.Output, width))
+func formatArgPreview(key string, v any) string {
+	if isSensitiveKey(key) {
+		return "<redacted>"
+	}
+	switch t := v.(type) {
+	case string:
+		s := safeOneLine(t, 26)
+		if s == "" {
+			return `""`
 		}
-		if strings.TrimSpace(result.Error) != "" {
-			wrapped := strings.Split(wrapText("Error: "+result.Error, width), "\n")
-			red := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-			for _, line := range wrapped {
-				lines = append(lines, red.Render(line))
-			}
+		return fmt.Sprintf("%q", s)
+	case float64:
+		if t == float64(int64(t)) {
+			return fmt.Sprintf("%d", int64(t))
+		}
+		return fmt.Sprintf("%.3g", t)
+	case bool:
+		return fmt.Sprintf("%t", t)
+	case nil:
+		return "null"
+	case []any:
+		return fmt.Sprintf("[%d]", len(t))
+	case map[string]any:
+		return "{…}"
+	default:
+		return fmt.Sprintf("%T", v)
+	}
+}
+
+func isSensitiveKey(key string) bool {
+	lower := strings.ToLower(strings.TrimSpace(key))
+	if lower == "" {
+		return false
+	}
+	sensitive := []string{"api_key", "apikey", "token", "secret", "password", "passwd", "authorization", "bearer", "cookie"}
+	for _, needle := range sensitive {
+		if strings.Contains(lower, needle) {
+			return true
 		}
 	}
-	return lines, toolKeys, toolOffsets
+	return false
+}
+
+func summarizeToolResult(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if parsed, ok := parseMCPResult(trimmed); ok {
+		switch {
+		case strings.TrimSpace(parsed.Text) != "":
+			return safeOneLine(parsed.Text, 90)
+		case strings.TrimSpace(parsed.Structured) != "":
+			return "structured"
+		case strings.TrimSpace(parsed.RawJSON) != "":
+			return "json"
+		}
+	}
+	if strings.HasPrefix(strings.TrimSpace(trimmed), "ERROR:") {
+		return safeOneLine(strings.TrimSpace(trimmed), 140)
+	}
+	return safeOneLine(trimmed, 110)
 }
 
 func toolUIKey(runID string, agentID string, toolKey string) string {
@@ -1140,6 +1369,16 @@ func (m *tuiModel) renderSessions(width int, height int) string {
 		line := fmt.Sprintf("%s%s", prefix, run.ID)
 		lines = append(lines, truncateANSI(line, width-1))
 	}
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	hint := truncateANSI(hintStyle.Render("-Sessions: Shift+↑/↓"), width-1)
+	if height > 0 {
+		need := height - len(lines) - 1
+		for need > 0 {
+			lines = append(lines, "")
+			need--
+		}
+	}
+	lines = append(lines, hint)
 	return style.Render(strings.Join(lines, "\n"))
 }
 
@@ -1177,6 +1416,17 @@ func (m *tuiModel) renderStatus(width int, height int) string {
 		line := fmt.Sprintf("%s %s %s", arrow, id, statusStyle.Render(status))
 		lines = append(lines, truncateANSI(line, width-1))
 	}
+
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	hint := truncateANSI(hintStyle.Render("TAB: switch agent"), width-1)
+	if height > 0 {
+		need := height - len(lines) - 1
+		for need > 0 {
+			lines = append(lines, "")
+			need--
+		}
+	}
+	lines = append(lines, hint)
 	return style.Render(strings.Join(lines, "\n"))
 }
 
@@ -1187,17 +1437,17 @@ func (m *tuiModel) renderCenter(width int, height int) string {
 	}
 
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	header := headerStyle.Render("Chat")
-
-	focusText := "INPUT"
-	if m.focus == tuiFocusBrowse {
-		focusText = "BROWSE"
+	headerText := "Chat"
+	if m.busy && strings.TrimSpace(m.spinner()) != "" {
+		headerText += " " + m.spinner()
 	}
-	if m.busy {
-		focusText += " (busy)"
-	}
+	header := headerStyle.Render(headerText)
 
-	subHeader := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(fmt.Sprintf("Mode: %s | Agent: %s", focusText, m.currentAgentID()))
+	sessionID := strings.TrimSpace(m.currentRunID())
+	if sessionID == "" {
+		sessionID = "-"
+	}
+	subHeader := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(fmt.Sprintf("Session: %s | Agent: %s", sessionID, m.currentAgentID()))
 	notice := ""
 	if strings.TrimSpace(m.notice) != "" {
 		notice = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(truncateANSI("Error: "+m.notice, max(10, width-2)))
@@ -1215,13 +1465,15 @@ func (m *tuiModel) renderCenter(width int, height int) string {
 func (m *tuiModel) renderInputLine(width int) string {
 	if m.busy {
 		m.input.Blur()
-		return lipgloss.NewStyle().Width(width).Padding(0, 1).Foreground(lipgloss.Color("8")).Render("Thinking…")
+		thinking := "Thinking"
+		if strings.TrimSpace(m.spinner()) != "" {
+			thinking += " " + m.spinner()
+		} else {
+			thinking += "…"
+		}
+		return lipgloss.NewStyle().Width(width).Padding(0, 1).Foreground(lipgloss.Color("8")).Render(thinking)
 	}
-	if m.focus == tuiFocusInput {
-		m.input.Focus()
-	} else {
-		m.input.Blur()
-	}
+	m.input.Focus()
 	m.input.Width = max(10, width-2)
 	return lipgloss.NewStyle().Width(width).Padding(0, 1).Render(m.input.View())
 }
