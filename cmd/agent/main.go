@@ -27,10 +27,11 @@ type runtimeOptions struct {
 }
 
 type agentRuntime struct {
-	Client    *llm.Client
-	Registry  *tools.Registry
-	ReloadMCP func(context.Context) (string, error)
-	closeFn   func() error
+	Client      *llm.Client
+	Registry    *tools.Registry
+	Coordinator *multiagent.Coordinator
+	ReloadMCP   func(context.Context) (string, error)
+	closeFn     func() error
 }
 
 func (r *agentRuntime) Close() error {
@@ -79,6 +80,7 @@ func runChat(args []string) error {
 	temperature := fs.Float64("temperature", 0.2, "LLM temperature")
 	maxTokens := fs.Int("max-tokens", 0, "max tokens for completion (overrides config)")
 	chatToolMode := fs.String("chat-tool-mode", "dispatcher", "chat tool access: dispatcher (agent_* only) or full")
+	uiMode := fs.String("ui", "tui", "ui mode: tui (default) or plain")
 	configPath := fs.String("config", "config.json", "path to config.json")
 	mcpConfigPath := fs.String("mcp-config", "mcp.json", "path to MCP config")
 	multiAgentRoot := fs.String("multi-agent-root", ".multi_agent/runs", "path to multi-agent run storage")
@@ -110,8 +112,15 @@ func runChat(args []string) error {
 	ag.Temperature = float32(*temperature)
 	ag.MCPReload = rt.ReloadMCP
 
-	fmt.Println("Agent ready. Type /mcp reload to refresh MCP servers, or /exit to quit.")
-	return ag.RunInteractive(context.Background(), os.Stdin, os.Stdout)
+	switch strings.ToLower(strings.TrimSpace(*uiMode)) {
+	case "", "tui":
+		return ag.RunInteractiveTUI(context.Background(), os.Stdin, os.Stdout, agent.TUIOptions{
+			Coordinator: rt.Coordinator,
+		})
+	default:
+		fmt.Println("Agent ready. Type /mcp reload to refresh MCP servers, or /exit to quit.")
+		return ag.RunInteractive(context.Background(), os.Stdin, os.Stdout)
+	}
 }
 
 func runWorker(args []string) error {
@@ -322,9 +331,10 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	registry.Register(&tools.AgentSignalWaitTool{Coordinator: coord})
 
 	return &agentRuntime{
-		Client:    client,
-		Registry:  registry,
-		ReloadMCP: reloadMCP,
+		Client:      client,
+		Registry:    registry,
+		Coordinator: coord,
+		ReloadMCP:   reloadMCP,
 		closeFn: func() error {
 			return mcpRuntime.Close()
 		},
