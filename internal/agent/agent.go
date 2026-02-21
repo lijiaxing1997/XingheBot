@@ -46,9 +46,9 @@ type TaskOptions struct {
 
 func New(client *llm.Client, registry *tools.Registry, skillsDir string) (*Agent, error) {
 	a := &Agent{
-		Client:    client,
-		Tools:     registry,
-		SkillsDir: skillsDir,
+		Client:     client,
+		Tools:      registry,
+		SkillsDir:  skillsDir,
 		PromptMode: PromptModeChat,
 	}
 	if err := a.ReloadSkills(); err != nil {
@@ -85,12 +85,16 @@ func (a *Agent) buildSystemPrompt() string {
 	b.WriteString("When the user requests skill management, use skill_create or skill_install.\n")
 	b.WriteString("When MCP config/server setup changes at runtime, use mcp_reload to refresh MCP tools without restarting the agent.\n")
 	b.WriteString("If the user asks to refresh/reload MCP in natural language, execute mcp_reload automatically.\n")
-	b.WriteString("For complex tasks, you may create parallel child agents with agent_run_create + agent_spawn, and coordinate using agent_wait, agent_control, agent_signal_send, and agent_signal_wait.\n")
 	switch a.PromptMode {
 	case PromptModeWorker:
+		b.WriteString("For complex tasks, you may create parallel child agents with agent_run_create + agent_spawn, and coordinate using agent_wait, agent_control, agent_signal_send, and agent_signal_wait.\n")
 		b.WriteString("You are running as a CHILD worker agent. Focus on completing the assigned task. You may receive additional operator messages mid-run; treat them as updated requirements.\n")
 	default:
+		b.WriteString("For complex tasks, you may create parallel child agents with agent_run_create + agent_spawn.\n")
 		b.WriteString("You are running as the PRIMARY (gateway) agent in chat mode. Prefer asynchronous multi-agent execution: after planning + spawning child agents, return control to the user instead of blocking. Avoid calling agent_wait unless the user explicitly asks to wait; prefer agent_state / agent_run_list / agent_inspect for progress.\n")
+		b.WriteString("When you need to spawn multiple child agents, batch the required agent_spawn calls in ONE response whenever possible.\n")
+		b.WriteString("If the user asks for multiple child agents (e.g., 2), spawn ALL of them first; do not stop after the first spawn.\n")
+		b.WriteString("After spawning child agents, do NOT wait for them to finish. End the current turn by replying to the user (no further tool calls), and tell the user how to check progress and how to send guidance via agent_control(message).\n")
 		b.WriteString("To guide a child agent mid-run, use agent_control with command=\"message\" and payload like {\"text\":\"...\",\"role\":\"user\"}.\n")
 	}
 	b.WriteString("If a user mentions a skill name or uses $SkillName, load it with skill_load before proceeding.\n")
@@ -227,55 +231,7 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 
 func (a *Agent) callTool(ctx context.Context, call llm.ToolCall) (string, error) {
 	args := json.RawMessage(call.Function.Arguments)
-	if a.PromptMode == PromptModeChat {
-		switch strings.TrimSpace(call.Function.Name) {
-		case "agent_wait", "agent_signal_wait":
-			args = clampTimeoutSeconds(args, 2, 15)
-		}
-	}
 	return a.Tools.Call(ctx, call.Function.Name, args)
-}
-
-func clampTimeoutSeconds(raw json.RawMessage, defaultSeconds int, maxSeconds int) json.RawMessage {
-	if defaultSeconds <= 0 {
-		defaultSeconds = 2
-	}
-	if maxSeconds <= 0 {
-		maxSeconds = 15
-	}
-
-	text := strings.TrimSpace(string(raw))
-	if text == "" {
-		return raw
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return raw
-	}
-	if obj == nil {
-		return raw
-	}
-
-	timeout := 0
-	if v, ok := obj["timeout_seconds"]; ok {
-		if n, ok := v.(float64); ok {
-			timeout = int(n)
-		}
-	}
-	switch {
-	case timeout <= 0:
-		obj["timeout_seconds"] = defaultSeconds
-	case timeout > maxSeconds:
-		obj["timeout_seconds"] = maxSeconds
-	default:
-		return raw
-	}
-
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return raw
-	}
-	return out
 }
 
 func (a *Agent) RunTask(ctx context.Context, task string, opts TaskOptions) (string, error) {
