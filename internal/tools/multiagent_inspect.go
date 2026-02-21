@@ -229,6 +229,8 @@ type agentInspectArgs struct {
 	StdoutTailLines int    `json:"stdout_tail_lines"`
 	StderrTailLines int    `json:"stderr_tail_lines"`
 	MaxBytes        int    `json:"max_bytes"`
+	IncludeTask     bool   `json:"include_task"`
+	TaskPreviewChars int   `json:"task_preview_chars"`
 }
 
 func (t *AgentInspectTool) Definition() llm.ToolDefinition {
@@ -247,6 +249,8 @@ func (t *AgentInspectTool) Definition() llm.ToolDefinition {
 					"stdout_tail_lines":  map[string]any{"type": "integer"},
 					"stderr_tail_lines":  map[string]any{"type": "integer"},
 					"max_bytes":          map[string]any{"type": "integer"},
+					"include_task":       map[string]any{"type": "boolean", "description": "include full spec.task (off by default to avoid accidental execution)"},
+					"task_preview_chars": map[string]any{"type": "integer", "description": "if include_task=false, include a short task_preview (0 disables)"},
 				},
 				"required": []string{"run_id", "agent_id"},
 			},
@@ -287,6 +291,14 @@ func (t *AgentInspectTool) Call(ctx context.Context, args json.RawMessage) (stri
 	maxBytes := in.MaxBytes
 	if maxBytes <= 0 {
 		maxBytes = 128 * 1024
+	}
+	includeTask := in.IncludeTask
+	taskPreviewChars := in.TaskPreviewChars
+	if taskPreviewChars < 0 {
+		taskPreviewChars = 0
+	}
+	if taskPreviewChars == 0 {
+		taskPreviewChars = 240
 	}
 
 	spec, specErr := t.Coordinator.ReadAgentSpec(runID, agentID)
@@ -337,7 +349,38 @@ func (t *AgentInspectTool) Call(ctx context.Context, args json.RawMessage) (stri
 		"inspected_at":  time.Now().UTC(),
 	}
 	if specErr == nil {
-		out["spec"] = spec
+		specOut := map[string]any{
+			"run_id":     spec.RunID,
+			"id":         spec.ID,
+			"created_at": spec.CreatedAt,
+		}
+		if spec.MaxTurns > 0 {
+			specOut["max_turns"] = spec.MaxTurns
+		}
+		if spec.Temperature != nil {
+			specOut["temperature"] = *spec.Temperature
+		}
+		if spec.MaxTokens > 0 {
+			specOut["max_tokens"] = spec.MaxTokens
+		}
+		if len(spec.Metadata) > 0 {
+			specOut["metadata"] = spec.Metadata
+		}
+		if includeTask {
+			specOut["task"] = spec.Task
+		} else {
+			out["task_omitted"] = true
+			if taskPreviewChars > 0 {
+				task := strings.TrimSpace(spec.Task)
+				if task != "" {
+					if len(task) > taskPreviewChars {
+						task = task[:taskPreviewChars] + "…"
+					}
+					out["task_preview"] = task
+				}
+			}
+		}
+		out["spec"] = specOut
 	}
 	if stateErr == nil {
 		out["state"] = state

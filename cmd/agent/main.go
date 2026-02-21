@@ -78,6 +78,7 @@ func runChat(args []string) error {
 	skillsDir := fs.String("skills-dir", defaultSkillsDir(), "skills directory")
 	temperature := fs.Float64("temperature", 0.2, "LLM temperature")
 	maxTokens := fs.Int("max-tokens", 0, "max tokens for completion (overrides config)")
+	chatToolMode := fs.String("chat-tool-mode", "dispatcher", "chat tool access: dispatcher (agent_* only) or full")
 	configPath := fs.String("config", "config.json", "path to config.json")
 	mcpConfigPath := fs.String("mcp-config", "mcp.json", "path to MCP config")
 	multiAgentRoot := fs.String("multi-agent-root", ".multi_agent/runs", "path to multi-agent run storage")
@@ -105,6 +106,7 @@ func runChat(args []string) error {
 		return err
 	}
 	ag.SetPromptMode(agent.PromptModeChat)
+	ag.SetChatToolMode(agent.ChatToolMode(*chatToolMode))
 	ag.Temperature = float32(*temperature)
 	ag.MCPReload = rt.ReloadMCP
 
@@ -309,11 +311,13 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 		WorkDir:            workDir,
 	})
 	registry.Register(&tools.AgentStateTool{Coordinator: coord})
+	registry.Register(&tools.AgentProgressTool{Coordinator: coord})
 	registry.Register(&tools.AgentWaitTool{Coordinator: coord})
 	registry.Register(&tools.AgentControlTool{Coordinator: coord})
 	registry.Register(&tools.AgentEventsTool{Coordinator: coord})
 	registry.Register(&tools.AgentInspectTool{Coordinator: coord})
 	registry.Register(&tools.AgentResultTool{Coordinator: coord})
+	registry.Register(&tools.SubagentsTool{Coordinator: coord})
 	registry.Register(&tools.AgentSignalSendTool{Coordinator: coord})
 	registry.Register(&tools.AgentSignalWaitTool{Coordinator: coord})
 

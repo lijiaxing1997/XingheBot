@@ -24,6 +24,7 @@ type Agent struct {
 	Temperature  float32
 	SystemPrompt string
 	PromptMode   PromptMode
+	ChatToolMode ChatToolMode
 }
 
 type PromptMode string
@@ -31,6 +32,13 @@ type PromptMode string
 const (
 	PromptModeChat   PromptMode = "chat"
 	PromptModeWorker PromptMode = "worker"
+)
+
+type ChatToolMode string
+
+const (
+	ChatToolModeDispatcher ChatToolMode = "dispatcher"
+	ChatToolModeFull       ChatToolMode = "full"
 )
 
 type TaskHooks struct {
@@ -46,10 +54,11 @@ type TaskOptions struct {
 
 func New(client *llm.Client, registry *tools.Registry, skillsDir string) (*Agent, error) {
 	a := &Agent{
-		Client:     client,
-		Tools:      registry,
-		SkillsDir:  skillsDir,
-		PromptMode: PromptModeChat,
+		Client:       client,
+		Tools:        registry,
+		SkillsDir:    skillsDir,
+		PromptMode:   PromptModeChat,
+		ChatToolMode: ChatToolModeDispatcher,
 	}
 	if err := a.ReloadSkills(); err != nil {
 		return nil, err
@@ -66,6 +75,19 @@ func (a *Agent) SetPromptMode(mode PromptMode) {
 		mode = PromptModeChat
 	}
 	a.PromptMode = mode
+	a.SystemPrompt = a.buildSystemPrompt()
+}
+
+func (a *Agent) SetChatToolMode(mode ChatToolMode) {
+	if a == nil {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(string(mode))) {
+	case string(ChatToolModeFull):
+		a.ChatToolMode = ChatToolModeFull
+	default:
+		a.ChatToolMode = ChatToolModeDispatcher
+	}
 	a.SystemPrompt = a.buildSystemPrompt()
 }
 
@@ -92,6 +114,10 @@ func (a *Agent) buildSystemPrompt() string {
 	default:
 		b.WriteString("For complex tasks, you may create parallel child agents with agent_run_create + agent_spawn.\n")
 		b.WriteString("You are running as the PRIMARY (gateway) agent in chat mode. You MUST behave like an asynchronous dispatcher.\n")
+		if a.ChatToolMode == ChatToolModeDispatcher {
+			b.WriteString("Tool policy (chat/dispatcher mode): You MUST NOT call direct filesystem/exec tools. Only use agent_* tools, subagents (orchestration), skill_* tools (skill management), and mcp_reload. To do real work, spawn child agents.\n")
+			b.WriteString("Progress checks must be non-blocking unless the user explicitly asks you to wait until completion.\n")
+		}
 		b.WriteString("\n")
 		b.WriteString("Asynchronous rules (chat mode):\n")
 		b.WriteString("1) Prefer delegating complex/slow tasks to child agents (multi-step changes, repo-wide edits, refactors, builds/tests, migrations, large file generation, anything that may take noticeable time).\n")
@@ -102,7 +128,8 @@ func (a *Agent) buildSystemPrompt() string {
 		b.WriteString("\n")
 		b.WriteString("Progress/ops (non-blocking):\n")
 		b.WriteString("- Use agent_run_list to answer \"有什么正在执行\" when run_id is unknown.\n")
-		b.WriteString("- Use agent_state / agent_events / agent_inspect to check progress and load context.\n")
+		b.WriteString("- Use agent_progress (preferred) or agent_state / agent_events / agent_inspect to check progress and load context.\n")
+		b.WriteString("- Use subagents for unified list/steer/kill orchestration.\n")
 		b.WriteString("- Use agent_control with command=\"message\" to guide a child agent mid-run. Payload example: {\"text\":\"...\",\"role\":\"user\"}.\n")
 		b.WriteString("\n")
 		b.WriteString("Examples:\n")
@@ -169,6 +196,17 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 		}
 
 		skillMsgs := a.skillMessagesForInput(text)
+		policy := newTurnToolPolicy(a.PromptMode, a.ChatToolMode, text)
+		toolDefs := a.Tools.Definitions()
+		if a.PromptMode == PromptModeChat {
+			filtered := make([]llm.ToolDefinition, 0, len(toolDefs))
+			for _, def := range toolDefs {
+				if policy.toolVisible(def.Function.Name) {
+					filtered = append(filtered, def)
+				}
+			}
+			toolDefs = filtered
+		}
 
 		turnHistory := []llm.Message{{Role: "user", Content: text}}
 		reqMessages := append([]llm.Message{}, systemMsg)
@@ -179,7 +217,7 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 		for {
 			resp, err := a.Client.Chat(ctx, llm.ChatRequest{
 				Messages:    reqMessages,
-				Tools:       a.Tools.Definitions(),
+				Tools:       toolDefs,
 				Temperature: a.Temperature,
 			})
 			if err != nil {
@@ -201,7 +239,7 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 			for _, call := range msg.ToolCalls {
 				printer.printToolCall(call.Function.Name, call.Function.Arguments)
 				start := time.Now()
-				result, err := a.callTool(ctx, call)
+				result, err := a.callToolWithPolicy(ctx, call, &policy)
 				printer.printToolResult(call.Function.Name, result, err, time.Since(start))
 				toolMsg := llm.Message{
 					Role:       "tool",

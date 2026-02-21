@@ -32,13 +32,15 @@
 - `agent_run_list`: 列出当前 run（用于不知道 run_id 时回答“有什么正在执行”）。
 - `agent_spawn`: 启动子 Agent 进程。
 - `agent_state`: 查询子 Agent 状态。
+- `agent_progress`: 非阻塞进度快照（state + 最近 events；单个 agent 还会带 stdout/stderr tail）。用于“快速看进度”，避免循环 poll `agent_events`。
 - `agent_wait`: 阻塞等待一个或多个子 Agent 结束。
 - `agent_control`: 发送 `pause|resume|cancel|message` 命令。
 - `agent_events`: 拉取事件流。
-- `agent_inspect`: 装载子 Agent 执行上下文（spec/state、最近 events/commands、stdout/stderr tail），便于排查与指导。
+- `agent_inspect`: 装载子 Agent 执行上下文（spec/state、最近 events/commands、stdout/stderr tail），便于排查与指导；默认不包含完整 `spec.task`（需要时传 `include_task=true`）。
 - `agent_result`: 读取最终结果。
 - `agent_signal_send`: 发送信号（跨 Agent 协调）。
 - `agent_signal_wait`: 等待信号（阻塞）。
+- `subagents`: 一体化子 Agent 编排工具：`list`/`steer`/`kill`（用于快速查看、引导、取消/强杀子 Agent）。
 
 ## 4. 典型流程
 
@@ -54,5 +56,7 @@
 
 - 交互模式：`agent chat ...`
 - 子 Agent worker 进程：`agent worker --run-root ... --run-id ... --agent-id ...`
+
+`agent chat` 默认是 dispatcher 模式：主 Agent 只允许调用 `agent_*` / `subagents` / `skill_*` / `mcp_reload`，避免主 Agent“直接干活”。如需允许主 Agent 直接使用文件/exec 工具，可用：`agent chat --chat-tool-mode full`。
 
 `agent_spawn` 会自动拉起 `agent worker`，通常不需要手动执行。

@@ -458,13 +458,16 @@ func (t *AgentControlTool) Definition() llm.ToolDefinition {
 		Type: "function",
 		Function: llm.ToolFunctionDef{
 			Name:        "agent_control",
-			Description: "Send control command to a child agent. Commands: pause, resume, cancel, message.",
+			Description: "Send a control command to a child agent. Commands: pause, resume, cancel, message.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"run_id":   map[string]any{"type": "string"},
 					"agent_id": map[string]any{"type": "string"},
-					"command":  map[string]any{"type": "string"},
+					"command": map[string]any{
+						"type": "string",
+						"enum": []string{"pause", "resume", "cancel", "message"},
+					},
 					"payload":  map[string]any{"type": "object"},
 				},
 				"required": []string{"run_id", "agent_id", "command"},
