@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -444,6 +445,13 @@ func (t *AgentWaitTool) loadTargetStates(runID string, agentID string) ([]multia
 
 type AgentControlTool struct {
 	Coordinator *multiagent.Coordinator
+	Executable         string
+	SkillsDir          string
+	ConfigPath         string
+	MCPConfigPath      string
+	DefaultTemperature float64
+	DefaultMaxTokens   int
+	WorkDir            string
 }
 
 type agentControlArgs struct {
@@ -499,7 +507,152 @@ func (t *AgentControlTool) Call(ctx context.Context, args json.RawMessage) (stri
 	if err != nil {
 		return "", err
 	}
-	return prettyJSON(cmd)
+
+	out := map[string]any{
+		"seq":        cmd.Seq,
+		"type":       cmd.Type,
+		"payload":    cmd.Payload,
+		"created_at": cmd.CreatedAt,
+	}
+
+	if command == multiagent.CommandMessage {
+		revive := map[string]any{
+			"attempted": false,
+			"spawned":   false,
+		}
+		state, stateErr := t.Coordinator.ReadAgentState(in.RunID, in.AgentID)
+		if stateErr == nil && multiagent.IsTerminalStatus(state.Status) {
+			revive["attempted"] = true
+			pid, reviveErr := t.reviveAgent(in.RunID, in.AgentID)
+			if reviveErr != nil {
+				revive["error"] = reviveErr.Error()
+			} else if pid > 0 {
+				revive["spawned"] = true
+				revive["pid"] = pid
+			}
+		}
+		out["revive"] = revive
+	}
+
+	return prettyJSON(out)
+}
+
+func (t *AgentControlTool) reviveAgent(runID string, agentID string) (int, error) {
+	if t == nil || t.Coordinator == nil {
+		return 0, errors.New("multi-agent coordinator is not configured")
+	}
+	if strings.TrimSpace(runID) == "" || strings.TrimSpace(agentID) == "" {
+		return 0, errors.New("run_id and agent_id are required")
+	}
+	if _, err := t.Coordinator.ReadAgentSpec(runID, agentID); err != nil {
+		return 0, fmt.Errorf("agent spec not found: %w", err)
+	}
+
+	executable := strings.TrimSpace(t.Executable)
+	if executable == "" {
+		var err error
+		executable, err = os.Executable()
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	cmdArgs := []string{
+		"worker",
+		"--run-root", t.Coordinator.RunRoot,
+		"--run-id", strings.TrimSpace(runID),
+		"--agent-id", strings.TrimSpace(agentID),
+		"--skills-dir", t.SkillsDir,
+		"--temperature", strconv.FormatFloat(t.DefaultTemperature, 'f', -1, 64),
+		"--config", t.ConfigPath,
+		"--mcp-config", t.MCPConfigPath,
+	}
+	if t.DefaultMaxTokens > 0 {
+		cmdArgs = append(cmdArgs, "--max-tokens", strconv.Itoa(t.DefaultMaxTokens))
+	}
+
+	agentDir := t.Coordinator.AgentDir(runID, agentID)
+	stdoutPath := filepath.Join(agentDir, "stdout.log")
+	stderrPath := filepath.Join(agentDir, "stderr.log")
+	stdoutFile, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	defer stdoutFile.Close()
+	stderrFile, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	defer stderrFile.Close()
+
+	cmd := exec.Command(executable, cmdArgs...)
+	workDir := strings.TrimSpace(t.WorkDir)
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
+	cmd.Env = os.Environ()
+	cmd.Stdout = stdoutFile
+	cmd.Stderr = stderrFile
+
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+
+	go func(runID string, agentID string) {
+		waitErr := cmd.Wait()
+		if waitErr == nil {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+		state, err := t.Coordinator.ReadAgentState(runID, agentID)
+		if err != nil {
+			return
+		}
+		if multiagent.IsTerminalStatus(state.Status) {
+			return
+		}
+		now := time.Now().UTC()
+		state.Status = multiagent.StatusFailed
+		state.Error = "worker process exited: " + waitErr.Error()
+		state.FinishedAt = now
+		state.UpdatedAt = now
+		_ = t.Coordinator.UpdateAgentState(runID, state)
+		_, _ = t.Coordinator.AppendEvent(runID, agentID, multiagent.AgentEvent{
+			Type:      "process_exit",
+			Message:   "worker process exited unexpectedly",
+			CreatedAt: now,
+			Payload: map[string]any{
+				"error": waitErr.Error(),
+			},
+		})
+	}(strings.TrimSpace(runID), strings.TrimSpace(agentID))
+
+	now := time.Now().UTC()
+	state, err := t.Coordinator.ReadAgentState(runID, agentID)
+	if err == nil {
+		state.Status = multiagent.StatusRunning
+		state.PID = cmd.Process.Pid
+		state.StartedAt = now
+		state.UpdatedAt = now
+		state.FinishedAt = time.Time{}
+		state.Error = ""
+		state.ResultPath = ""
+		_ = t.Coordinator.UpdateAgentState(runID, state)
+	}
+
+	_, _ = t.Coordinator.AppendEvent(runID, agentID, multiagent.AgentEvent{
+		Type:      "revived",
+		Message:   "worker process revived after terminal state",
+		CreatedAt: now,
+		Payload: map[string]any{
+			"pid":        cmd.Process.Pid,
+			"executable": executable,
+			"args":       strings.Join(cmdArgs, " "),
+			"work_dir":   workDir,
+		},
+	})
+
+	return cmd.Process.Pid, nil
 }
 
 type AgentEventsTool struct {

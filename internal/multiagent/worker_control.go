@@ -35,6 +35,9 @@ func (w *WorkerController) Start(pid int) error {
 	if err != nil {
 		return err
 	}
+	if state.LastCommandSeq > 0 {
+		w.LastCommandSeq = state.LastCommandSeq
+	}
 	now := time.Now().UTC()
 	state.Status = StatusRunning
 	state.PID = pid
@@ -174,8 +177,10 @@ func (w *WorkerController) pollCommands(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	seqUpdated := false
 	for _, cmd := range commands {
 		w.LastCommandSeq = cmd.Seq
+		seqUpdated = true
 		switch normalizeCommandType(cmd.Type) {
 		case CommandPause:
 			w.paused = true
@@ -206,6 +211,11 @@ func (w *WorkerController) pollCommands(ctx context.Context) error {
 				CreatedAt: time.Now().UTC(),
 				Payload:   cmd.Payload,
 			})
+			if seqUpdated {
+				if err := w.persistLastCommandSeq(); err != nil {
+					return err
+				}
+			}
 			return ErrAgentCanceled
 		case CommandMessage:
 			w.pendingMessages = append(w.pendingMessages, cmd)
@@ -224,12 +234,32 @@ func (w *WorkerController) pollCommands(ctx context.Context) error {
 			})
 		}
 	}
+	if seqUpdated {
+		if err := w.persistLastCommandSeq(); err != nil {
+			return err
+		}
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 		return nil
 	}
+}
+
+func (w *WorkerController) persistLastCommandSeq() error {
+	if w == nil || w.Coord == nil {
+		return nil
+	}
+	state, err := w.Coord.ReadAgentState(w.RunID, w.AgentID)
+	if err != nil {
+		return err
+	}
+	if state.LastCommandSeq == w.LastCommandSeq {
+		return nil
+	}
+	state.LastCommandSeq = w.LastCommandSeq
+	return w.Coord.UpdateAgentState(w.RunID, state)
 }
 
 func (w *WorkerController) DrainMessages() []AgentCommand {

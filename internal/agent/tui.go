@@ -81,6 +81,7 @@ type tuiModel struct {
 
 	sessions     []multiagent.RunManifest
 	sessionIndex int
+	sessionCursor int
 
 	sessionData map[string]*tuiSessionData
 
@@ -102,6 +103,8 @@ type tuiModel struct {
 	loading bool
 	busy    bool
 	notice  string
+	deleteConfirmRunID string
+	deleteConfirmAt    time.Time
 	fatal   error
 }
 
@@ -127,6 +130,17 @@ type tuiRefreshMsg struct{}
 type tuiSessionCreatedMsg struct {
 	Run multiagent.RunManifest
 	Err error
+}
+
+type tuiSessionDeletedMsg struct {
+	RunID string
+	Err   error
+}
+
+type tuiRunManifestUpdatedMsg struct {
+	RunID string
+	Run   multiagent.RunManifest
+	Err   error
 }
 
 type tuiAsyncMsg struct {
@@ -204,6 +218,13 @@ func tuiCreateSessionCmd(coord *multiagent.Coordinator) tea.Cmd {
 	}
 }
 
+func tuiDeleteSessionCmd(coord *multiagent.Coordinator, runID string) tea.Cmd {
+	return func() tea.Msg {
+		err := coord.DeleteRun(runID)
+		return tuiSessionDeletedMsg{RunID: runID, Err: err}
+	}
+}
+
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -245,6 +266,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		m.sessionCursor = m.sessionIndex
 		m.ensureSessionLoaded(m.currentRunID())
 		m.createPrimaryAgent(m.currentRunID())
 		m.refreshAgentIDs()
@@ -267,10 +289,64 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.sessions = append([]multiagent.RunManifest{msg.Run}, m.sessions...)
 		m.sessionIndex = 0
+		m.sessionCursor = 0
 		m.ensureSessionLoaded(m.currentRunID())
 		m.createPrimaryAgent(m.currentRunID())
 		m.refreshAgentIDs()
 		m.notice = ""
+		m.rerender()
+		return m, nil
+	case tuiSessionDeletedMsg:
+		if msg.Err != nil {
+			m.notice = msg.Err.Error()
+			return m, nil
+		}
+		deletedID := strings.TrimSpace(msg.RunID)
+		if deletedID == "" {
+			return m, nil
+		}
+		delete(m.sessionData, deletedID)
+
+		deletedIndex := -1
+		for i := range m.sessions {
+			if strings.TrimSpace(m.sessions[i].ID) == deletedID {
+				deletedIndex = i
+				break
+			}
+		}
+		if deletedIndex >= 0 {
+			m.sessions = append(m.sessions[:deletedIndex], m.sessions[deletedIndex+1:]...)
+			if deletedIndex < m.sessionIndex {
+				m.sessionIndex--
+			} else if deletedIndex == m.sessionIndex {
+				if m.sessionIndex >= len(m.sessions) {
+					m.sessionIndex = len(m.sessions) - 1
+				}
+			}
+		}
+
+		m.deleteConfirmRunID = ""
+		m.deleteConfirmAt = time.Time{}
+		m.notice = ""
+
+		if len(m.sessions) == 0 {
+			m.sessionIndex = 0
+			m.sessionCursor = -1
+			m.rerender()
+			return m, tuiCreateSessionCmd(m.coord)
+		}
+		if m.sessionIndex < 0 {
+			m.sessionIndex = 0
+		}
+		if m.sessionIndex >= len(m.sessions) {
+			m.sessionIndex = len(m.sessions) - 1
+		}
+		m.sessionCursor = m.sessionIndex
+		m.ensureSessionLoaded(m.currentRunID())
+		m.createPrimaryAgent(m.currentRunID())
+		m.refreshAgentIDs()
+		m.cursorLine = -1
+		m.stickToBottom = true
 		m.rerender()
 		return m, nil
 	case tuiSessionSelectedMsg:
@@ -280,6 +356,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i, run := range m.sessions {
 			if run.ID == msg.RunID {
 				m.sessionIndex = i
+				m.sessionCursor = i
 				m.ensureSessionLoaded(msg.RunID)
 				m.createPrimaryAgent(msg.RunID)
 				m.refreshAgentIDs()
@@ -293,7 +370,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if handled {
 			return m, cmd
 		}
-		if m.busy {
+		if m.busy || m.currentAgentID() != tuiPrimaryAgentID {
 			return m, nil
 		}
 		m.input, cmd = m.input.Update(msg)
@@ -317,6 +394,24 @@ func (m *tuiModel) handleAsyncEvent(evt tea.Msg) {
 		m.busy = msg.Busy
 	case tuiSetNoticeMsg:
 		m.notice = strings.TrimSpace(msg.Text)
+	case tuiRunManifestUpdatedMsg:
+		if msg.Err != nil {
+			m.notice = strings.TrimSpace(msg.Err.Error())
+			return
+		}
+		id := strings.TrimSpace(msg.RunID)
+		if id == "" {
+			id = strings.TrimSpace(msg.Run.ID)
+		}
+		if id == "" {
+			return
+		}
+		for i := range m.sessions {
+			if m.sessions[i].ID == id {
+				m.sessions[i] = msg.Run
+				break
+			}
+		}
 	default:
 	}
 }
@@ -330,6 +425,22 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		return true, tuiLoadSessionsCmd(m.coord)
 	case "ctrl+n":
 		return true, tuiCreateSessionCmd(m.coord)
+	case "ctrl+d":
+		runID := strings.TrimSpace(m.currentRunID())
+		if runID == "" {
+			return true, nil
+		}
+		if strings.TrimSpace(m.deleteConfirmRunID) == runID && !m.deleteConfirmAt.IsZero() && time.Since(m.deleteConfirmAt) < 3*time.Second {
+			m.deleteConfirmRunID = ""
+			m.deleteConfirmAt = time.Time{}
+			m.notice = ""
+			return true, tuiDeleteSessionCmd(m.coord, runID)
+		}
+		m.deleteConfirmRunID = runID
+		m.deleteConfirmAt = time.Now().UTC()
+		m.notice = "Press Ctrl+D again to delete this session."
+		m.rerender()
+		return true, nil
 	case "tab":
 		if len(m.agentIDs) > 0 {
 			m.agentIndex = (m.agentIndex + 1) % len(m.agentIDs)
@@ -364,6 +475,19 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.pageCursor(1)
 		return true, nil
 	case "enter":
+		if m.sessionCursor == -1 {
+			m.notice = ""
+			return true, tuiCreateSessionCmd(m.coord)
+		}
+		if m.currentAgentID() != tuiPrimaryAgentID {
+			if strings.TrimSpace(m.input.Value()) == "" {
+				m.toggleToolAtCursor()
+				return true, nil
+			}
+			m.notice = "Sub-agent view is read-only. Press TAB to return to primary chat."
+			m.rerender()
+			return true, nil
+		}
 		if strings.TrimSpace(m.input.Value()) == "" {
 			m.toggleToolAtCursor()
 			return true, nil
@@ -541,23 +665,39 @@ func (m *tuiModel) refreshAgentIDs() {
 }
 
 func (m *tuiModel) selectSession(delta int) {
-	if len(m.sessions) == 0 || delta == 0 {
+	if delta == 0 {
 		return
 	}
-	next := m.sessionIndex + delta
-	for next < 0 {
-		next += len(m.sessions)
-	}
-	next = next % len(m.sessions)
-	if next == m.sessionIndex {
+	if len(m.sessions) == 0 {
+		m.sessionCursor = -1
+		m.rerender()
 		return
 	}
-	m.sessionIndex = next
-	m.ensureSessionLoaded(m.currentRunID())
-	m.createPrimaryAgent(m.currentRunID())
-	m.refreshAgentIDs()
-	m.cursorLine = -1
-	m.stickToBottom = true
+
+	cur := m.sessionCursor
+	if cur < -1 || cur >= len(m.sessions) {
+		cur = m.sessionIndex
+	}
+
+	total := len(m.sessions) + 1 // +1 for "New session"
+	pos := cur + 1
+	nextPos := (pos + delta) % total
+	if nextPos < 0 {
+		nextPos += total
+	}
+	next := nextPos - 1
+	m.sessionCursor = next
+
+	if next >= 0 {
+		if next != m.sessionIndex {
+			m.sessionIndex = next
+			m.ensureSessionLoaded(m.currentRunID())
+			m.createPrimaryAgent(m.currentRunID())
+			m.refreshAgentIDs()
+			m.cursorLine = -1
+			m.stickToBottom = true
+		}
+	}
 	m.rerender()
 }
 
@@ -646,6 +786,7 @@ func (m *tuiModel) submitInput() tea.Cmd {
 	m.createPrimaryAgent(runID)
 	sess := m.sessionData[runID]
 	base := append([]llm.Message(nil), sess.History...)
+	shouldSetTitle := len(base) == 0 && !m.runHasTitle(runID)
 
 	userMsg := llm.Message{Role: "user", Content: text}
 	sess.History = append(sess.History, userMsg)
@@ -656,7 +797,7 @@ func (m *tuiModel) submitInput() tea.Cmd {
 	m.stickToBottom = true
 	m.cursorLine = -1
 	m.rerender()
-	go m.runTurn(runID, text, base)
+	go m.runTurn(runID, text, base, shouldSetTitle)
 	return nil
 }
 
@@ -683,14 +824,22 @@ func (m *tuiModel) runMCPReload(runID string) {
 	}
 }
 
-func (m *tuiModel) runTurn(runID string, userText string, baseHistory []llm.Message) {
+func (m *tuiModel) runTurn(runID string, userText string, baseHistory []llm.Message, shouldSetTitle bool) {
 	events := m.events
 	agentRef := m.agent
+	coord := m.coord
 	ctx := m.ctx
 
 	defer func() {
 		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{Busy: false}}
 	}()
+
+	if shouldSetTitle && coord != nil {
+		if title := generateSessionTitle(ctx, agentRef, userText); strings.TrimSpace(title) != "" {
+			updated, err := coord.SetRunTitle(runID, title)
+			events <- tuiAsyncMsg{Event: tuiRunManifestUpdatedMsg{RunID: runID, Run: updated, Err: err}}
+		}
+	}
 
 	emit := func(msg llm.Message) {
 		events <- tuiAsyncMsg{Event: tuiAppendHistoryMsg{
@@ -702,6 +851,87 @@ func (m *tuiModel) runTurn(runID string, userText string, baseHistory []llm.Mess
 	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit); err != nil {
 		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
 	}
+}
+
+func (m *tuiModel) runHasTitle(runID string) bool {
+	id := strings.TrimSpace(runID)
+	if id == "" {
+		return false
+	}
+	for _, run := range m.sessions {
+		if strings.TrimSpace(run.ID) != id {
+			continue
+		}
+		if run.Metadata == nil {
+			return false
+		}
+		if v, ok := run.Metadata["title"]; ok {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func generateSessionTitle(ctx context.Context, a *Agent, userText string) string {
+	if a == nil || a.Client == nil {
+		return ""
+	}
+	text := strings.TrimSpace(userText)
+	if text == "" {
+		return ""
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	titleCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	sys := llm.Message{
+		Role: "system",
+		Content: strings.Join([]string{
+			"You are a session management agent. Create a concise chat session title based on the user's first message.",
+			"Rules:",
+			"- Output ONLY the title (no quotes, no markdown, no extra text).",
+			"- Use the user's language when possible.",
+			"- Keep it short (<= 12 words, or <= 20 Chinese characters).",
+			"- Avoid trailing punctuation.",
+		}, "\n"),
+	}
+	resp, err := a.Client.Chat(titleCtx, llm.ChatRequest{
+		Messages: []llm.Message{
+			sys,
+			{Role: "user", Content: text},
+		},
+		Temperature: 0.2,
+	})
+	if err != nil || len(resp.Choices) == 0 {
+		return fallbackSessionTitle(text)
+	}
+
+	title := strings.TrimSpace(resp.Choices[0].Message.Content)
+	if i := strings.IndexByte(title, '\n'); i >= 0 {
+		title = title[:i]
+	}
+	title = strings.Trim(title, `"'`+"`")
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return fallbackSessionTitle(text)
+	}
+	return title
+}
+
+func fallbackSessionTitle(userText string) string {
+	text := safeOneLine(userText, 80)
+	text = strings.Trim(text, `"'`+"`")
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "New session"
+	}
+	return text
 }
 
 func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText string, baseHistory []llm.Message, emit func(llm.Message)) error {
@@ -1396,24 +1626,47 @@ func (m *tuiModel) renderSessions(width int, height int) string {
 	title := lipgloss.NewStyle().Bold(true).Render("Sessions")
 	lines = append(lines, title)
 	lines = append(lines, "")
+
+	cursor := m.sessionCursor
+	if cursor < -1 || cursor >= len(m.sessions) {
+		cursor = m.sessionIndex
+	}
+
+	newPrefix := "  "
+	if cursor == -1 {
+		newPrefix = "> "
+	}
+	newStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	lines = append(lines, truncateANSI(newPrefix+newStyle.Render("+ New session"), width-1))
+	lines = append(lines, "")
+
+	activeStyle := lipgloss.NewStyle().Bold(true)
 	for i, run := range m.sessions {
 		prefix := "  "
-		if i == m.sessionIndex {
+		if i == cursor {
 			prefix = "> "
 		}
-		line := fmt.Sprintf("%s%s", prefix, run.ID)
+		label := multiagent.RunTitle(run)
+		if i == m.sessionIndex {
+			label = activeStyle.Render(label)
+		}
+		line := fmt.Sprintf("%s%s", prefix, label)
 		lines = append(lines, truncateANSI(line, width-1))
 	}
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	hint := truncateANSI(hintStyle.Render("-Sessions: Shift+↑/↓"), width-1)
+	hints := []string{
+		truncateANSI(hintStyle.Render("-Sessions: Shift+↑/↓"), width-1),
+		truncateANSI(hintStyle.Render("-New session: Enter"), width-1),
+		truncateANSI(hintStyle.Render("-Delete session: Ctrl+D"), width-1),
+	}
 	if height > 0 {
-		need := height - len(lines) - 1
+		need := height - len(lines) - len(hints)
 		for need > 0 {
 			lines = append(lines, "")
 			need--
 		}
 	}
-	lines = append(lines, hint)
+	lines = append(lines, hints...)
 	return style.Render(strings.Join(lines, "\n"))
 }
 
@@ -1515,6 +1768,12 @@ func (m *tuiModel) renderInputLine(width int) string {
 			thinking += "…"
 		}
 		return lipgloss.NewStyle().Width(width).Padding(0, 1).Foreground(lipgloss.Color("8")).Render(thinking)
+	}
+	if m.currentAgentID() != tuiPrimaryAgentID {
+		m.input.Blur()
+		hintStyle := lipgloss.NewStyle().Width(width).Padding(0, 1).Foreground(lipgloss.Color("8"))
+		msg := "Sub-agent view is read-only. Press TAB to return to primary chat; use agent_control to message sub-agents."
+		return hintStyle.Render(truncateANSI(msg, max(10, width-2)))
 	}
 	m.input.Focus()
 	m.input.Width = max(10, width-2)

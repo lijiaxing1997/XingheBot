@@ -343,7 +343,16 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	registry.Register(&tools.AgentStateTool{Coordinator: coord})
 	registry.Register(&tools.AgentProgressTool{Coordinator: coord})
 	registry.Register(&tools.AgentWaitTool{Coordinator: coord})
-	registry.Register(&tools.AgentControlTool{Coordinator: coord})
+	registry.Register(&tools.AgentControlTool{
+		Coordinator:        coord,
+		Executable:         executable,
+		SkillsDir:          opts.SkillsDir,
+		ConfigPath:         opts.ConfigPath,
+		MCPConfigPath:      opts.MCPConfigPath,
+		DefaultTemperature: opts.Temperature,
+		DefaultMaxTokens:   opts.MaxTokens,
+		WorkDir:            workDir,
+	})
 	registry.Register(&tools.AgentEventsTool{Coordinator: coord})
 	registry.Register(&tools.AgentInspectTool{Coordinator: coord})
 	registry.Register(&tools.AgentResultTool{Coordinator: coord})

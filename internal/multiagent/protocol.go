@@ -45,6 +45,7 @@ type AgentState struct {
 	AgentID    string    `json:"agent_id"`
 	Status     string    `json:"status"`
 	PID        int       `json:"pid,omitempty"`
+	LastCommandSeq int64 `json:"last_command_seq,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	StartedAt  time.Time `json:"started_at,omitempty"`
 	UpdatedAt  time.Time `json:"updated_at"`
