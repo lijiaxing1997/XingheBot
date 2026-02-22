@@ -11,11 +11,11 @@ import (
 var ErrAgentCanceled = errors.New("agent canceled by command")
 
 type WorkerController struct {
-	Coord          *Coordinator
-	RunID          string
-	AgentID        string
-	LastCommandSeq int64
-	paused         bool
+	Coord           *Coordinator
+	RunID           string
+	AgentID         string
+	LastCommandSeq  int64
+	paused          bool
 	pendingMessages []AgentCommand
 }
 
@@ -168,6 +168,20 @@ func (w *WorkerController) Finish(output string, runErr error) error {
 			"status": status,
 			"error":  errText,
 		},
+	})
+	_, _ = w.Coord.AppendSignal(w.RunID, "agent_finished", Signal{
+		Key:         "agent_finished",
+		FromAgentID: w.AgentID,
+		Payload: map[string]any{
+			"agent_id":       w.AgentID,
+			"status":         status,
+			"finished_at":    finishedAt,
+			"result_path":    state.ResultPath,
+			"error":          errText,
+			"output_length":  len(output),
+			"output_preview": safePreview(output, 1600),
+		},
+		CreatedAt: finishedAt,
 	})
 	return err
 }

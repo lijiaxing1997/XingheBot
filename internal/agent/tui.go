@@ -79,8 +79,8 @@ type tuiModel struct {
 	width  int
 	height int
 
-	sessions     []multiagent.RunManifest
-	sessionIndex int
+	sessions      []multiagent.RunManifest
+	sessionIndex  int
 	sessionCursor int
 
 	sessionData map[string]*tuiSessionData
@@ -100,12 +100,12 @@ type tuiModel struct {
 	stickToBottom bool
 	spinnerFrame  int
 
-	loading bool
-	busy    bool
-	notice  string
+	loading            bool
+	busy               bool
+	notice             string
 	deleteConfirmRunID string
 	deleteConfirmAt    time.Time
-	fatal   error
+	fatal              error
 }
 
 type tuiSessionData struct {
@@ -280,6 +280,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(tuiSpinnerFrames)
 		}
 		m.refreshAgentIDs()
+		m.maybeAutoFollowup()
 		m.rerender()
 		return m, tuiTickCmd()
 	case tuiSessionCreatedMsg:
@@ -378,6 +379,235 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+const (
+	autoFollowupMaxAgentsPerTick      = 6
+	autoFollowupMaxTaskChars          = 800
+	autoFollowupMaxOutputPreviewChars = 5000
+)
+
+func (m *tuiModel) maybeAutoFollowup() {
+	if m == nil || m.coord == nil || m.agent == nil {
+		return
+	}
+	if m.busy {
+		return
+	}
+	runID := strings.TrimSpace(m.currentRunID())
+	if runID == "" {
+		return
+	}
+
+	m.ensureSessionLoaded(runID)
+	m.createPrimaryAgent(runID)
+	sess := m.sessionData[runID]
+	if sess == nil {
+		return
+	}
+	// Avoid spamming old runs that have no conversation history.
+	if len(sess.History) == 0 {
+		return
+	}
+
+	ui, err := m.coord.ReadRunUIState(runID)
+	if err != nil {
+		return
+	}
+	states, err := m.coord.ListAgentStates(runID)
+	if err != nil {
+		return
+	}
+
+	now := time.Now().UTC()
+	pending := make([]multiagent.AgentState, 0, 4)
+	for _, st := range states {
+		if strings.TrimSpace(st.AgentID) == "" || st.AgentID == tuiPrimaryAgentID {
+			continue
+		}
+		if !multiagent.IsTerminalStatus(st.Status) {
+			continue
+		}
+		finishedAt := st.FinishedAt
+		if finishedAt.IsZero() {
+			finishedAt = st.UpdatedAt
+		}
+		if ui.ReportedAgentResults != nil {
+			if rec, ok := ui.ReportedAgentResults[st.AgentID]; ok && !rec.FinishedAt.IsZero() && finishedAt.Equal(rec.FinishedAt) {
+				continue
+			}
+		}
+		pending = append(pending, st)
+	}
+	if len(pending) == 0 {
+		return
+	}
+	sort.Slice(pending, func(i, j int) bool {
+		ai := pending[i].FinishedAt
+		aj := pending[j].FinishedAt
+		if ai.IsZero() {
+			ai = pending[i].UpdatedAt
+		}
+		if aj.IsZero() {
+			aj = pending[j].UpdatedAt
+		}
+		if ai.Equal(aj) {
+			return pending[i].AgentID < pending[j].AgentID
+		}
+		return ai.Before(aj)
+	})
+
+	if len(pending) > autoFollowupMaxAgentsPerTick {
+		pending = pending[:autoFollowupMaxAgentsPerTick]
+	}
+
+	content, previews := m.buildAutoFollowupSystemMessage(runID, pending, now)
+	sysMsg := llm.Message{Role: "system", Content: content}
+	sess.History = append(sess.History, sysMsg)
+	_ = appendJSONL(sess.HistoryPath, sysMsg)
+
+	reports := make([]multiagent.ReportedAgentResultRecord, 0, len(pending))
+	for _, st := range pending {
+		finishedAt := st.FinishedAt
+		if finishedAt.IsZero() {
+			finishedAt = st.UpdatedAt
+		}
+		if finishedAt.IsZero() {
+			finishedAt = now
+		}
+		resultPath := strings.TrimSpace(st.ResultPath)
+		if resultPath == "" {
+			resultPath = m.coord.AgentResultPath(runID, st.AgentID)
+		}
+		reports = append(reports, multiagent.ReportedAgentResultRecord{
+			AgentID:      st.AgentID,
+			Status:       st.Status,
+			FinishedAt:   finishedAt,
+			ResultPath:   resultPath,
+			Error:        st.Error,
+			PreviewChars: previews[st.AgentID],
+		})
+	}
+	if _, err := m.coord.MarkAgentResultsReported(runID, reports, now); err != nil {
+		m.notice = err.Error()
+	}
+
+	base := append([]llm.Message(nil), sess.History...)
+	m.busy = true
+	m.notice = ""
+	m.stickToBottom = true
+	m.cursorLine = -1
+	m.rerender()
+	go m.runAutoFollowup(runID, base)
+}
+
+func (m *tuiModel) buildAutoFollowupSystemMessage(runID string, states []multiagent.AgentState, now time.Time) (string, map[string]int) {
+	previews := make(map[string]int, len(states))
+	var b strings.Builder
+	b.WriteString("[System Message] Subagent work completed.\n")
+	b.WriteString(fmt.Sprintf("run_id=%s\n", strings.TrimSpace(runID)))
+	if !now.IsZero() {
+		b.WriteString(fmt.Sprintf("reported_at=%s\n", now.Format(time.RFC3339)))
+	}
+	b.WriteString("\n")
+
+	b.WriteString("Results:\n")
+	for _, st := range states {
+		agentID := strings.TrimSpace(st.AgentID)
+		if agentID == "" {
+			continue
+		}
+		spec, _ := m.coord.ReadAgentSpec(runID, agentID)
+		result, _ := m.coord.ReadResult(runID, agentID)
+		finishedAt := st.FinishedAt
+		if finishedAt.IsZero() {
+			finishedAt = result.FinishedAt
+		}
+		if finishedAt.IsZero() {
+			finishedAt = st.UpdatedAt
+		}
+
+		b.WriteString("\n")
+		b.WriteString(fmt.Sprintf("- agent_id=%s status=%s\n", agentID, strings.TrimSpace(st.Status)))
+		if !finishedAt.IsZero() {
+			b.WriteString(fmt.Sprintf("  finished_at=%s\n", finishedAt.Format(time.RFC3339)))
+		}
+		if task := strings.TrimSpace(spec.Task); task != "" {
+			preview, _ := truncateForPrompt(task, autoFollowupMaxTaskChars)
+			b.WriteString("  task:\n")
+			b.WriteString(indentBlock(preview, "    "))
+			b.WriteString("\n")
+		}
+		if errText := strings.TrimSpace(result.Error); errText != "" {
+			b.WriteString("  error:\n")
+			b.WriteString(indentBlock(errText, "    "))
+			b.WriteString("\n")
+		}
+		out := strings.TrimSpace(result.Output)
+		if out == "" && strings.TrimSpace(st.Error) != "" {
+			out = "ERROR: " + strings.TrimSpace(st.Error)
+		}
+		if out != "" {
+			preview, truncated := truncateForPrompt(out, autoFollowupMaxOutputPreviewChars)
+			previews[agentID] = len(preview)
+			b.WriteString("  output:\n")
+			b.WriteString(indentBlock(preview, "    "))
+			if truncated {
+				b.WriteString("\n")
+				b.WriteString("    ...(truncated)\n")
+			} else {
+				b.WriteString("\n")
+			}
+		}
+		agentDir := m.coord.AgentDir(runID, agentID)
+		b.WriteString(fmt.Sprintf("  agent_dir=%s\n", agentDir))
+		b.WriteString(fmt.Sprintf("  result_path=%s\n", m.coord.AgentResultPath(runID, agentID)))
+	}
+
+	b.WriteString("\n")
+	b.WriteString("Please provide a user-facing update that synthesizes these results with the session context. Avoid dumping raw logs; summarize, list key file changes, and propose next steps.\n")
+	return b.String(), previews
+}
+
+func (m *tuiModel) runAutoFollowup(runID string, baseHistory []llm.Message) {
+	events := m.events
+	agentRef := m.agent
+	ctx := m.ctx
+
+	defer func() {
+		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{Busy: false}}
+	}()
+
+	emit := func(msg llm.Message) {
+		events <- tuiAsyncMsg{Event: tuiAppendHistoryMsg{
+			RunID: runID,
+			Msg:   msg,
+		}}
+	}
+
+	userText := "Using the latest [System Message] about subagent completion and the full session context: synthesize a concise user-facing update (what happened, what changed, files touched, commands to run if any, and next steps). If anything is ambiguous, ask the minimal clarifying questions."
+	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit); err != nil {
+		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
+	}
+}
+
+func truncateForPrompt(s string, limit int) (string, bool) {
+	if limit <= 0 {
+		return "", true
+	}
+	text := strings.TrimSpace(s)
+	if len(text) <= limit {
+		return text, false
+	}
+	return text[:limit], true
+}
+
+func indentBlock(text string, prefix string) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *tuiModel) handleAsyncEvent(evt tea.Msg) {
@@ -959,7 +1189,6 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 	}
 	toolCtx := multiagent.WithSessionRunID(ctx, runID)
 
-	skillMsgs := a.skillMessagesForInput(userText)
 	policy := newTurnToolPolicy(a.PromptMode, a.ChatToolMode, userText)
 
 	toolDefs := a.Tools.Definitions()
@@ -976,7 +1205,6 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 	turnHistory := []llm.Message{{Role: "user", Content: userText}}
 	reqMessages := append([]llm.Message{}, systemMsg, sessionMsg)
 	reqMessages = append(reqMessages, baseHistory...)
-	reqMessages = append(reqMessages, skillMsgs...)
 	reqMessages = append(reqMessages, turnHistory...)
 
 	for {

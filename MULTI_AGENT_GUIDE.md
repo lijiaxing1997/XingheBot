@@ -54,6 +54,20 @@
    - `message`：`payload` 推荐 `{ "text": "...", "role": "user" }`。子 Agent 会在下一次 model call 前注入为一条消息，从而实现“主 Agent 指导子 Agent 执行”。
 6. 需要“barrier/event”协同时，子 Agent 用 `agent_signal_send` + `agent_signal_wait`。
 
+### 4.1 TUI 自动回传（主窗口自动分析子 Agent 结果）
+
+在 `agent chat --ui=tui` 中：
+
+- 子 Agent 进入终态（`completed/failed/canceled`）后，TUI 会把该子 Agent 的结果（含输出预览、路径等）写入主对话的 `[System Message]`。
+- 随后主 Agent 会基于该 `[System Message]` + 主对话上下文，自动生成一条**用户可读**的综合回复（避免直接 dump 原始日志）。
+- 去重依赖 run 的 `ui_state.json`（`reported_agent_results`），避免重复通知。
+
+### 4.2 默认完成信号：`agent_finished`
+
+worker 在结束时会自动向 run-level signals 发布 `agent_finished`（payload 包含 `agent_id/status/finished_at/result_path/output_preview` 等）。
+
+- 需要阻塞等待可用：`agent_signal_wait`（注意：chat/dispatcher 模式默认禁止阻塞等待，除非用户明确要求等待）。
+
 ## 5. CLI 入口
 
 - 交互模式：`agent chat ...`

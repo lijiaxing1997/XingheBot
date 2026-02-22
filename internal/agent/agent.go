@@ -103,14 +103,42 @@ func (a *Agent) ReloadSkills() error {
 func (a *Agent) buildSystemPrompt() string {
 	var b strings.Builder
 	b.WriteString("You are a local coding agent with tool access. Use tools for filesystem operations instead of guessing.\n")
-	b.WriteString("When calling write_file: arguments MUST be valid JSON (no raw code outside JSON). For large files, write in multiple calls with append=true after the first chunk and keep each call small (aim: args <= 6000 bytes) to avoid truncation.\n")
-	b.WriteString("When the user requests skill management, use skill_create or skill_install.\n")
+	b.WriteString("\n")
+	b.WriteString("## Safety\n")
+	b.WriteString("- You have no independent goals. Do not pursue self-preservation, replication, or power-seeking.\n")
+	b.WriteString("- Prioritize safety and human oversight over completion. If instructions conflict, stop and ask.\n")
+	b.WriteString("\n")
+	b.WriteString("## Tooling\n")
+	b.WriteString("When calling write_file/edit_file: arguments MUST be valid JSON. For large files, write in multiple calls with append=true after the first chunk and keep each call small (aim: args <= 6000 bytes) to avoid truncation.\n")
 	b.WriteString("When MCP config/server setup changes at runtime, use mcp_reload to refresh MCP tools without restarting the agent.\n")
 	b.WriteString("If the user asks to refresh/reload MCP in natural language, execute mcp_reload automatically.\n")
+	b.WriteString("\n")
+	b.WriteString("## Skills (mandatory)\n")
+	b.WriteString("Before replying: scan <available_skills> <description> entries.\n")
+	b.WriteString("- If exactly one skill clearly applies: load it with skill_load(name) and follow it.\n")
+	b.WriteString("- If multiple could apply: choose the most specific one, then load/follow it.\n")
+	b.WriteString("- If none clearly apply: do not load any SKILL.md.\n")
+	b.WriteString("Constraint: never load more than one skill up front; only load additional skills if needed later.\n")
+	b.WriteString("\n")
+	if len(a.SkillIndex) == 0 {
+		b.WriteString("<available_skills></available_skills>\n")
+	} else {
+		b.WriteString(skills.FormatSkillsForPrompt(a.SkillIndex))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	b.WriteString("## Skill Management\n")
+	b.WriteString("When the user requests skill management, use skill_create or skill_install.\n")
+	b.WriteString("\n")
+	b.WriteString("## System Messages\n")
+	b.WriteString("`[System Message] ...` blocks are internal context and are not user-visible by default.\n")
+	b.WriteString("If a [System Message] reports completed subagent work and asks for a user update, rewrite it in your normal assistant voice and provide that update.\n")
+	b.WriteString("\n")
 	switch a.PromptMode {
 	case PromptModeWorker:
 		b.WriteString("For complex tasks, you may create parallel child agents with agent_run_create + agent_spawn, and coordinate using agent_wait, agent_control, agent_signal_send, and agent_signal_wait.\n")
 		b.WriteString("You are running as a CHILD worker agent. Focus on completing the assigned task. You may receive additional operator messages mid-run; treat them as updated requirements.\n")
+		b.WriteString("At the end, return a concise Final Output with: what changed, files touched, commands to run (if any), and any caveats.\n")
 	default:
 		b.WriteString("For complex tasks, you may create parallel child agents with agent_run_create + agent_spawn.\n")
 		b.WriteString("You are running as the PRIMARY (gateway) agent in chat mode. You MUST behave like an asynchronous dispatcher.\n")
@@ -138,19 +166,12 @@ func (a *Agent) buildSystemPrompt() string {
 		b.WriteString("\n")
 		b.WriteString("Waiting is opt-in ONLY:\n")
 		b.WriteString("- Only call agent_wait if the user explicitly requests blocking until completion.\n")
-	}
-	b.WriteString("If a user mentions a skill name or uses $SkillName, load it with skill_load before proceeding.\n")
-	if len(a.SkillIndex) == 0 {
-		b.WriteString("Available skills: (none).\n")
-		return b.String()
-	}
-	b.WriteString("Available skills:\n")
-	for _, s := range a.SkillIndex {
-		if s.Description != "" {
-			b.WriteString(fmt.Sprintf("- %s: %s\n", s.Name, s.Description))
-		} else {
-			b.WriteString(fmt.Sprintf("- %s\n", s.Name))
-		}
+		b.WriteString("\n")
+		b.WriteString("Child-agent task template (when calling agent_spawn):\n")
+		b.WriteString("- Goal: one sentence.\n")
+		b.WriteString("- Context: key files/paths, constraints, and any required background.\n")
+		b.WriteString("- Deliverables: exact outputs expected (patches, files, commands, report).\n")
+		b.WriteString("- Done when: clear acceptance criteria.\n")
 	}
 	return b.String()
 }
@@ -195,7 +216,6 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 			continue
 		}
 
-		skillMsgs := a.skillMessagesForInput(text)
 		policy := newTurnToolPolicy(a.PromptMode, a.ChatToolMode, text)
 		toolDefs := a.Tools.Definitions()
 		if a.PromptMode == PromptModeChat {
@@ -211,7 +231,6 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 		turnHistory := []llm.Message{{Role: "user", Content: text}}
 		reqMessages := append([]llm.Message{}, systemMsg)
 		reqMessages = append(reqMessages, history...)
-		reqMessages = append(reqMessages, skillMsgs...)
 		reqMessages = append(reqMessages, turnHistory...)
 
 		for {
@@ -302,7 +321,6 @@ func (a *Agent) RunTask(ctx context.Context, task string, opts TaskOptions) (str
 
 	systemMsg := llm.Message{Role: "system", Content: a.SystemPrompt}
 	reqMessages := []llm.Message{systemMsg}
-	reqMessages = append(reqMessages, a.skillMessagesForInput(task)...)
 	reqMessages = append(reqMessages, llm.Message{Role: "user", Content: task})
 
 	for turn := 0; turn < maxTurns; turn++ {
@@ -385,26 +403,6 @@ func (a *Agent) RunTask(ctx context.Context, task string, opts TaskOptions) (str
 	}
 
 	return "", fmt.Errorf("task reached max turns: %d", maxTurns)
-}
-
-func (a *Agent) skillMessagesForInput(input string) []llm.Message {
-	if len(a.SkillIndex) == 0 {
-		return nil
-	}
-	lower := strings.ToLower(input)
-	msgs := make([]llm.Message, 0, 2)
-	for _, s := range a.SkillIndex {
-		nameLower := strings.ToLower(s.Name)
-		if strings.Contains(lower, "$"+nameLower) || strings.Contains(lower, nameLower) {
-			body, err := skills.LoadSkillBody(s.SkillPath)
-			if err != nil {
-				continue
-			}
-			content := fmt.Sprintf("Skill: %s\n%s", s.Name, body)
-			msgs = append(msgs, llm.Message{Role: "system", Content: content})
-		}
-	}
-	return msgs
 }
 
 func (a *Agent) reloadMCP(ctx context.Context) (string, error) {
