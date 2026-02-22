@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -87,8 +88,10 @@ func runChat(args []string) error {
 	multiAgentRoot := fs.String("multi-agent-root", ".multi_agent/runs", "path to multi-agent run storage")
 	fs.Parse(args)
 
+	resolvedSkillsDir := resolvePath(*skillsDir)
+
 	rt, err := newAgentRuntime(runtimeOptions{
-		SkillsDir:      *skillsDir,
+		SkillsDir:      resolvedSkillsDir,
 		Temperature:    *temperature,
 		MaxTokens:      *maxTokens,
 		ConfigPath:     *configPath,
@@ -105,7 +108,7 @@ func runChat(args []string) error {
 		}
 	}()
 
-	ag, err := agent.New(rt.Client, rt.Registry, *skillsDir)
+	ag, err := agent.New(rt.Client, rt.Registry, resolvedSkillsDir)
 	if err != nil {
 		return err
 	}
@@ -137,6 +140,8 @@ func runWorker(args []string) error {
 	agentID := fs.String("agent-id", "", "agent id")
 	fs.Parse(args)
 
+	resolvedSkillsDir := resolvePath(*skillsDir)
+
 	if strings.TrimSpace(*runID) == "" || strings.TrimSpace(*agentID) == "" {
 		return fmt.Errorf("--run-id and --agent-id are required")
 	}
@@ -159,7 +164,7 @@ func runWorker(args []string) error {
 	}
 
 	rt, err := newAgentRuntime(runtimeOptions{
-		SkillsDir:      *skillsDir,
+		SkillsDir:      resolvedSkillsDir,
 		Temperature:    *temperature,
 		MaxTokens:      maxTokensValue,
 		ConfigPath:     *configPath,
@@ -177,7 +182,7 @@ func runWorker(args []string) error {
 		}
 	}()
 
-	ag, err := agent.New(rt.Client, rt.Registry, *skillsDir)
+	ag, err := agent.New(rt.Client, rt.Registry, resolvedSkillsDir)
 	if err != nil {
 		_ = ctl.Finish("", err)
 		return err
@@ -485,5 +490,41 @@ func defaultSkillsDir() string {
 	if dir := strings.TrimSpace(os.Getenv("SKILLS_DIR")); dir != "" {
 		return dir
 	}
+	if cwd, err := os.Getwd(); err == nil {
+		if root := findGitRoot(cwd); root != "" {
+			return filepath.Join(root, "skills")
+		}
+	}
 	return "skills"
+}
+
+func resolvePath(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(trimmed)
+	if err != nil {
+		return filepath.Clean(trimmed)
+	}
+	return filepath.Clean(abs)
+}
+
+func findGitRoot(startDir string) string {
+	current := filepath.Clean(strings.TrimSpace(startDir))
+	if current == "" {
+		return ""
+	}
+	for i := 0; i < 12; i++ {
+		gitPath := filepath.Join(current, ".git")
+		if info, err := os.Stat(gitPath); err == nil && (info.IsDir() || info.Mode().IsRegular()) {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return ""
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"sort"
@@ -67,11 +68,17 @@ func LoadSkillBody(skillPath string) (string, error) {
 }
 
 func CreateSkill(dir, name, description string) (*Skill, error) {
+	name = strings.TrimSpace(name)
+	description = strings.TrimSpace(description)
 	if name == "" {
 		return nil, errors.New("name is required")
 	}
 	if description == "" {
 		return nil, errors.New("description is required")
+	}
+	dir = resolveSkillsCreateRoot(dir)
+	if strings.TrimSpace(dir) == "" {
+		return nil, errors.New("skills directory is required")
 	}
 	folder := NormalizeSkillName(name)
 	skillDir := filepath.Join(dir, folder)
@@ -234,7 +241,8 @@ func ParseFrontmatter(content string) (Frontmatter, string, error) {
 }
 
 func NormalizeSkillName(name string) string {
-	name = strings.ToLower(strings.TrimSpace(name))
+	original := strings.TrimSpace(name)
+	name = strings.ToLower(original)
 	name = strings.ReplaceAll(name, " ", "-")
 	var b strings.Builder
 	for _, r := range name {
@@ -242,10 +250,22 @@ func NormalizeSkillName(name string) string {
 			b.WriteRune(r)
 		}
 	}
-	if b.Len() == 0 {
-		return "skill"
+	out := strings.Trim(b.String(), "-_")
+	if out == "" {
+		return "skill-" + shortHash(original)
 	}
-	return b.String()
+	if out == "skill" && strings.ToLower(original) != "skill" {
+		return "skill-" + shortHash(original)
+	}
+	const maxLen = 64
+	if len(out) > maxLen {
+		out = out[:maxLen]
+		out = strings.TrimRight(out, "-_")
+	}
+	if out == "" {
+		return "skill-" + shortHash(original)
+	}
+	return out
 }
 
 func titleCase(s string) string {
@@ -257,6 +277,36 @@ func titleCase(s string) string {
 		parts[i] = strings.ToUpper(p[:1]) + p[1:]
 	}
 	return strings.Join(parts, " ")
+}
+
+func shortHash(s string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(s))
+	sum := fmt.Sprintf("%08x", h.Sum32())
+	if len(sum) > 6 {
+		sum = sum[:6]
+	}
+	return sum
+}
+
+func resolveSkillsCreateRoot(dir string) string {
+	root := strings.TrimSpace(dir)
+	if root == "" {
+		return ""
+	}
+	root = filepath.Clean(root)
+
+	// If the provided dir already looks like a skills root, use it.
+	if strings.EqualFold(filepath.Base(root), "skills") {
+		return root
+	}
+
+	// If it contains a `skills/` directory, treat that as the real root.
+	nested := filepath.Join(root, "skills")
+	if info, err := os.Stat(nested); err == nil && info.IsDir() {
+		return nested
+	}
+	return root
 }
 
 func LoadSkillsWithOptions(dir string, opts LoadOptions) ([]Skill, error) {
