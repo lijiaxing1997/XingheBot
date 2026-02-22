@@ -4,5 +4,16 @@
   "base_url": "https://api.deepseek.com",
   "model": "deepseek-chat",
   "max_tokens": 0,
+  "multi_agent": {
+    "cleanup": {
+      "enabled": true,
+      "mode": "archive",
+      "interval_minutes": 10,
+      "archive_after_minutes": 60,
+      "keep_last": 20,
+      "include_failed": false,
+      "dry_run": false
+    }
+  },
   "notes": "max_tokens=0 means omit the parameter (provider default applies). Set a positive value to allow longer single responses if your provider defaults are small."
 }

@@ -24,6 +24,7 @@ type runtimeOptions struct {
 	ConfigPath     string
 	MCPConfigPath  string
 	MultiAgentRoot string
+	AutoCleanup    bool
 }
 
 type agentRuntime struct {
@@ -93,6 +94,7 @@ func runChat(args []string) error {
 		ConfigPath:     *configPath,
 		MCPConfigPath:  *mcpConfigPath,
 		MultiAgentRoot: *multiAgentRoot,
+		AutoCleanup:    true,
 	})
 	if err != nil {
 		return err
@@ -163,6 +165,7 @@ func runWorker(args []string) error {
 		ConfigPath:     *configPath,
 		MCPConfigPath:  *mcpConfigPath,
 		MultiAgentRoot: *multiAgentRoot,
+		AutoCleanup:    false,
 	})
 	if err != nil {
 		_ = ctl.Finish("", err)
@@ -301,14 +304,32 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	}
 
 	coord := multiagent.NewCoordinator(opts.MultiAgentRoot)
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	cleanupDone := (<-chan struct{})(nil)
+	if opts.AutoCleanup {
+		if raw, err := multiagent.LoadAutoCleanupConfig(opts.ConfigPath); err != nil {
+			fmt.Fprintln(os.Stderr, "warning:", err)
+		} else if resolved, err := multiagent.ResolveAutoCleanupConfig(opts.MultiAgentRoot, raw); err != nil {
+			fmt.Fprintln(os.Stderr, "warning:", err)
+		} else {
+			runner, err := multiagent.StartAutoCleanup(cleanupCtx, coord, resolved, nil)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "warning:", err)
+			} else if runner != nil {
+				cleanupDone = runner.Done
+			}
+		}
+	}
 	executable, err := os.Executable()
 	if err != nil {
+		cleanupCancel()
 		return nil, err
 	}
 	workDir, _ := os.Getwd()
 
 	registry.Register(&tools.AgentRunCreateTool{Coordinator: coord})
 	registry.Register(&tools.AgentRunListTool{Coordinator: coord})
+	registry.Register(&tools.AgentRunPruneTool{Coordinator: coord})
 	registry.Register(&tools.AgentSpawnTool{
 		Coordinator:        coord,
 		Executable:         executable,
@@ -326,6 +347,9 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	registry.Register(&tools.AgentEventsTool{Coordinator: coord})
 	registry.Register(&tools.AgentInspectTool{Coordinator: coord})
 	registry.Register(&tools.AgentResultTool{Coordinator: coord})
+	registry.Register(&tools.AgentSubagentHideTool{Coordinator: coord})
+	registry.Register(&tools.AgentSubagentShowTool{Coordinator: coord})
+	registry.Register(&tools.AgentSubagentListTool{Coordinator: coord})
 	registry.Register(&tools.SubagentsTool{Coordinator: coord})
 	registry.Register(&tools.AgentSignalSendTool{Coordinator: coord})
 	registry.Register(&tools.AgentSignalWaitTool{Coordinator: coord})
@@ -336,6 +360,13 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 		Coordinator: coord,
 		ReloadMCP:   reloadMCP,
 		closeFn: func() error {
+			cleanupCancel()
+			if cleanupDone != nil {
+				select {
+				case <-cleanupDone:
+				case <-time.After(2 * time.Second):
+				}
+			}
 			return mcpRuntime.Close()
 		},
 	}, nil

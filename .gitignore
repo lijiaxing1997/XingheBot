@@ -12,4 +12,5 @@ venv/
 */venv/
 
 # Multi-agent run artifacts
-.multi_agent/runs/**/agents/
+.multi_agent/runs/
+.multi_agent/archive/

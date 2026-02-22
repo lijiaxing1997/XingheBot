@@ -84,8 +84,11 @@ type tuiModel struct {
 
 	sessionData map[string]*tuiSessionData
 
-	agentIDs   []string
-	agentIndex int
+	agentIDs     []string
+	agentIndex   int
+	showDone     bool
+	hiddenDone   int
+	hiddenManual int
 
 	input    textinput.Model
 	viewport viewport.Model
@@ -164,6 +167,7 @@ func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator) t
 		expandedTools: make(map[string]bool),
 		cursorLine:    -1,
 		stickToBottom: true,
+		showDone:      false,
 	}
 }
 
@@ -334,6 +338,13 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.stickToBottom = true
 		m.rerender()
 		return true, nil
+	case "ctrl+t":
+		m.showDone = !m.showDone
+		m.refreshAgentIDs()
+		m.cursorLine = -1
+		m.stickToBottom = true
+		m.rerender()
+		return true, nil
 	case "shift+up", "alt+up":
 		m.selectSession(-1)
 		return true, nil
@@ -481,22 +492,45 @@ func (m *tuiModel) refreshAgentIDs() {
 	if runID == "" {
 		return
 	}
+	ui, _ := m.coord.ReadRunUIState(runID)
+	hidden := ui.HiddenAgents
 	states, err := m.coord.ListAgentStates(runID)
 	if err != nil {
 		return
 	}
 	ids := make([]string, 0, len(states)+1)
 	ids = append(ids, tuiPrimaryAgentID)
+	hiddenDone := 0
+	hiddenManual := 0
 	for _, st := range states {
 		if st.AgentID == tuiPrimaryAgentID {
 			continue
 		}
-		ids = append(ids, st.AgentID)
+		if _, ok := hidden[st.AgentID]; ok {
+			hiddenManual++
+			continue
+		}
+		status := strings.ToLower(strings.TrimSpace(st.Status))
+		if status == multiagent.StatusFailed {
+			ids = append(ids, st.AgentID)
+			continue
+		}
+		if !multiagent.IsTerminalStatus(status) {
+			ids = append(ids, st.AgentID)
+			continue
+		}
+		if m.showDone {
+			ids = append(ids, st.AgentID)
+			continue
+		}
+		hiddenDone++
 	}
 	sort.Strings(ids[1:])
 
 	current := m.currentAgentID()
 	m.agentIDs = ids
+	m.hiddenDone = hiddenDone
+	m.hiddenManual = hiddenManual
 	m.agentIndex = 0
 	for i, id := range m.agentIDs {
 		if id == current {
@@ -693,6 +727,7 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 			strings.TrimSpace(runID),
 		),
 	}
+	toolCtx := multiagent.WithSessionRunID(ctx, runID)
 
 	skillMsgs := a.skillMessagesForInput(userText)
 	policy := newTurnToolPolicy(a.PromptMode, a.ChatToolMode, userText)
@@ -744,7 +779,7 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 		needsAutoMCPReload := false
 		for _, call := range msg.ToolCalls {
 			start := time.Now()
-			result, callErr := a.callToolWithPolicy(ctx, call, &policy)
+			result, callErr := a.callToolWithPolicy(toolCtx, call, &policy)
 			_ = time.Since(start)
 
 			toolMsg := llm.Message{
@@ -1418,7 +1453,15 @@ func (m *tuiModel) renderStatus(width int, height int) string {
 	}
 
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	hint := truncateANSI(hintStyle.Render("TAB: switch agent"), width-1)
+	if m.hiddenManual > 0 {
+		hidden := fmt.Sprintf("hidden archived: %d (agent_subagent_list scope=hidden)", m.hiddenManual)
+		lines = append(lines, truncateANSI(hintStyle.Render(hidden), width-1))
+	}
+	if !m.showDone && m.hiddenDone > 0 {
+		hidden := fmt.Sprintf("hidden finished: %d (Ctrl+T to show)", m.hiddenDone)
+		lines = append(lines, truncateANSI(hintStyle.Render(hidden), width-1))
+	}
+	hint := truncateANSI(hintStyle.Render("TAB: switch agent | Ctrl+T: toggle finished"), width-1)
 	if height > 0 {
 		need := height - len(lines) - 1
 		for need > 0 {
