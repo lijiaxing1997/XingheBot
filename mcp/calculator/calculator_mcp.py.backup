@@ -4,19 +4,13 @@ Calculator MCP Server
 
 This server provides mathematical calculation tools including basic arithmetic,
 advanced mathematical functions, trigonometric operations, statistical calculations,
-unit conversions, and hash calculations.
+and unit conversions.
 '''
 
 from typing import Optional, List, Dict, Any, Union
 from enum import Enum
 import math
 import statistics
-import hashlib
-import json
-import os
-import re
-import zlib
-import base64
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from mcp.server.fastmcp import FastMCP
 
@@ -58,31 +52,6 @@ class UnitType(str, Enum):
     WEIGHT = "weight"
     AREA = "area"
     VOLUME = "volume"
-
-# Enums for hash calculations
-class HashAlgorithm(str, Enum):
-    '''Supported hash algorithms.'''
-    MD5 = "md5"
-    SHA1 = "sha1"
-    SHA256 = "sha256"
-    SHA512 = "sha512"
-    SHA3_256 = "sha3_256"
-    SHA3_512 = "sha3_512"
-    BLAKE2B = "blake2b"
-    CRC32 = "crc32"
-
-class InputType(str, Enum):
-    '''Supported input types.'''
-    TEXT = "text"
-    FILE = "file"
-    BASE64 = "base64"
-    HEX = "hex"
-
-class NormalizationType(str, Enum):
-    '''Supported normalization types.'''
-    NONE = "none"
-    JSON = "json"
-    TEXT = "text"
 
 class TemperatureUnit(str, Enum):
     '''Temperature units.'''
@@ -239,67 +208,6 @@ class UnitConversionInput(BaseModel):
             raise ValueError(f"Invalid unit for {unit_type}. Valid units: {', '.join(valid_units)}")
         return v
 
-# Hash calculation models
-class HashCalculationInput(BaseModel):
-    '''Input model for hash calculations.'''
-    model_config = ConfigDict(
-        str_strip_whitespace=True,
-        validate_assignment=True
-    )
-
-    algorithm: HashAlgorithm = Field(..., description="Hash algorithm to use")
-    input_type: InputType = Field(..., description="Type of input data")
-    input_data: str = Field(..., description="Input data (text, file path, base64, or hex)")
-    normalization: NormalizationType = Field(default=NormalizationType.NONE, description="Normalization to apply before hashing")
-    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
-
-    @field_validator('input_data')
-    @classmethod
-    def validate_input_data(cls, v: str, info) -> str:
-        input_type = info.data.get('input_type')
-        
-        if input_type == InputType.FILE:
-            # Check if file exists
-            if not os.path.exists(v):
-                raise ValueError(f"File not found: {v}")
-            if not os.path.isfile(v):
-                raise ValueError(f"Path is not a file: {v}")
-        elif input_type == InputType.BASE64:
-            # Validate base64 encoding
-            try:
-                base64.b64decode(v, validate=True)
-            except Exception:
-                raise ValueError("Invalid base64 encoded data")
-        elif input_type == InputType.HEX:
-            # Validate hex encoding
-            if not re.match(r'^[0-9a-fA-F]+$', v):
-                raise ValueError("Invalid hex encoded data")
-        
-        return v
-
-class HashComparisonInput(BaseModel):
-    '''Input model for hash comparisons.'''
-    model_config = ConfigDict(
-        str_strip_whitespace=True,
-        validate_assignment=True
-    )
-
-    algorithm: HashAlgorithm = Field(..., description="Hash algorithm to use")
-    input_type: InputType = Field(..., description="Type of input data")
-    input_data: str = Field(..., description="Input data (text, file path, base64, or hex)")
-    expected_hash: str = Field(..., description="Expected hash value to compare against")
-    normalization: NormalizationType = Field(default=NormalizationType.NONE, description="Normalization to apply before hashing")
-    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
-
-    @field_validator('expected_hash')
-    @classmethod
-    def validate_expected_hash(cls, v: str) -> str:
-        # Remove any whitespace and convert to lowercase
-        v = v.strip().lower()
-        if not re.match(r'^[0-9a-f]+$', v):
-            raise ValueError("Expected hash must be a hexadecimal string")
-        return v
-
 # Shared utility functions
 def _format_result_markdown(operation: str, result: Union[float, str], details: Dict[str, Any] = None) -> str:
     '''Format result as markdown.'''
@@ -329,79 +237,6 @@ def _format_result_json(operation: str, result: Union[float, str], details: Dict
         "details": details or {}
     }
     return json.dumps(response, indent=2)
-
-# Hash calculation utility functions
-def normalize_json(data: str) -> bytes:
-    '''Normalize JSON data by sorting keys and removing whitespace.'''
-    try:
-        parsed = json.loads(data)
-        normalized = json.dumps(parsed, sort_keys=True, separators=(',', ':'))
-        return normalized.encode('utf-8')
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON data: {str(e)}")
-
-def normalize_text(data: str) -> bytes:
-    '''Normalize text data by removing extra whitespace and normalizing line endings.'''
-    # Remove leading/trailing whitespace
-    data = data.strip()
-    # Normalize line endings to \n
-    data = re.sub(r'\r\n|\r', '\n', data)
-    # Remove multiple consecutive newlines
-    data = re.sub(r'\n{3,}', '\n\n', data)
-    # Remove multiple consecutive spaces
-    data = re.sub(r' {2,}', ' ', data)
-    return data.encode('utf-8')
-
-def normalize_data(data: bytes, normalization: NormalizationType) -> bytes:
-    '''Apply normalization to data based on the specified type.'''
-    if normalization == NormalizationType.NONE:
-        return data
-    
-    data_str = data.decode('utf-8', errors='ignore')
-    
-    if normalization == NormalizationType.JSON:
-        return normalize_json(data_str)
-    elif normalization == NormalizationType.TEXT:
-        return normalize_text(data_str)
-    else:
-        return data
-
-def calculate_hash(data: bytes, algorithm: HashAlgorithm) -> str:
-    '''Calculate hash of data using the specified algorithm.'''
-    if algorithm == HashAlgorithm.MD5:
-        return hashlib.md5(data).hexdigest()
-    elif algorithm == HashAlgorithm.SHA1:
-        return hashlib.sha1(data).hexdigest()
-    elif algorithm == HashAlgorithm.SHA256:
-        return hashlib.sha256(data).hexdigest()
-    elif algorithm == HashAlgorithm.SHA512:
-        return hashlib.sha512(data).hexdigest()
-    elif algorithm == HashAlgorithm.SHA3_256:
-        return hashlib.sha3_256(data).hexdigest()
-    elif algorithm == HashAlgorithm.SHA3_512:
-        return hashlib.sha3_512(data).hexdigest()
-    elif algorithm == HashAlgorithm.BLAKE2B:
-        return hashlib.blake2b(data).hexdigest()
-    elif algorithm == HashAlgorithm.CRC32:
-        # CRC32 returns an integer, convert to hex
-        crc_value = zlib.crc32(data) & 0xffffffff
-        return f"{crc_value:08x}"
-    else:
-        raise ValueError(f"Unsupported algorithm: {algorithm}")
-
-def get_input_data(input_type: InputType, input_data: str) -> bytes:
-    '''Get bytes from input based on input type.'''
-    if input_type == InputType.TEXT:
-        return input_data.encode('utf-8')
-    elif input_type == InputType.FILE:
-        with open(input_data, 'rb') as f:
-            return f.read()
-    elif input_type == InputType.BASE64:
-        return base64.b64decode(input_data)
-    elif input_type == InputType.HEX:
-        return bytes.fromhex(input_data)
-    else:
-        raise ValueError(f"Unsupported input type: {input_type}")
 
 # Tool definitions
 @mcp.tool(
@@ -838,166 +673,6 @@ async def calculator_unit_conversion(params: UnitConversionInput) -> str:
             return _format_result_markdown(f"Unit Conversion: {params.unit_type.value}", result, details)
         else:
             return _format_result_json(f"Unit Conversion: {params.unit_type.value}", result, details)
-            
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-@mcp.tool(
-    name="calculator_hash_calculation",
-    annotations={
-        "title": "Hash Calculation",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False
-    }
-)
-async def calculator_hash_calculation(params: HashCalculationInput) -> str:
-    '''Calculate hash of input data with optional normalization.
-
-    This tool provides hash calculation functionality for various algorithms
-    including MD5, SHA family, SHA3, BLAKE2B, and CRC32. It supports multiple
-    input types (text, file, base64, hex) and normalization options.
-
-    Args:
-        params (HashCalculationInput): Validated input parameters containing:
-            - algorithm (HashAlgorithm): Hash algorithm to use
-            - input_type (InputType): Type of input data
-            - input_data (str): Input data (text, file path, base64, or hex)
-            - normalization (NormalizationType): Normalization to apply before hashing
-            - response_format (ResponseFormat): Output format (markdown or json)
-
-    Returns:
-        str: Formatted result of the hash calculation
-
-    Examples:
-        - SHA256 of text: algorithm="sha256", input_type="text", input_data="Hello, World!"
-        - MD5 of file: algorithm="md5", input_type="file", input_data="/path/to/file.txt"
-        - SHA512 of base64: algorithm="sha512", input_type="base64", input_data="SGVsbG8sIFdvcmxkIQ=="
-
-    Error Handling:
-        - Returns "Error: File not found" for non-existent files
-        - Returns "Error: Invalid base64 encoded data" for invalid base64
-        - Input validation errors are handled by Pydantic model
-    '''
-    try:
-        # Get input data
-        data = get_input_data(params.input_type, params.input_data)
-        
-        # Apply normalization if requested
-        normalized_data = normalize_data(data, params.normalization)
-        
-        # Calculate hash
-        hash_value = calculate_hash(normalized_data, params.algorithm)
-        
-        # Prepare details
-        details = {
-            "algorithm": params.algorithm.value,
-            "input_type": params.input_type.value,
-            "normalization": params.normalization.value,
-            "input_size_bytes": len(data),
-            "normalized_size_bytes": len(normalized_data) if params.normalization != NormalizationType.NONE else len(data)
-        }
-        
-        if params.input_type == InputType.FILE:
-            details["file_path"] = params.input_data
-            details["file_size"] = os.path.getsize(params.input_data)
-        
-        # Format response
-        if params.response_format == ResponseFormat.MARKDOWN:
-            return _format_result_markdown(f"Hash Calculation: {params.algorithm.value}", hash_value, details)
-        else:
-            return _format_result_json(f"Hash Calculation: {params.algorithm.value}", hash_value, details)
-            
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-@mcp.tool(
-    name="calculator_hash_comparison",
-    annotations={
-        "title": "Hash Comparison",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False
-    }
-)
-async def calculator_hash_comparison(params: HashComparisonInput) -> str:
-    '''Calculate hash of input data and compare with expected hash.
-
-    This tool calculates the hash of input data and compares it with an
-    expected hash value. It's useful for verifying data integrity and
-    checking file authenticity.
-
-    Args:
-        params (HashComparisonInput): Validated input parameters containing:
-            - algorithm (HashAlgorithm): Hash algorithm to use
-            - input_type (InputType): Type of input data
-            - input_data (str): Input data (text, file path, base64, or hex)
-            - expected_hash (str): Expected hash value to compare against
-            - normalization (NormalizationType): Normalization to apply before hashing
-            - response_format (ResponseFormat): Output format (markdown or json)
-
-    Returns:
-        str: Formatted result of the hash comparison
-
-    Examples:
-        - Verify SHA256 hash: algorithm="sha256", input_type="text", 
-          input_data="Hello, World!", expected_hash="dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f"
-        - Verify file integrity: algorithm="md5", input_type="file", 
-          input_data="/path/to/file.txt", expected_hash="098f6bcd4621d373cade4e832627b4f6"
-
-    Error Handling:
-        - Returns "Error: File not found" for non-existent files
-        - Returns "Error: Expected hash must be a hexadecimal string" for invalid hash
-        - Input validation errors are handled by Pydantic model
-    '''
-    try:
-        # Get input data
-        data = get_input_data(params.input_type, params.input_data)
-        
-        # Apply normalization if requested
-        normalized_data = normalize_data(data, params.normalization)
-        
-        # Calculate hash
-        calculated_hash = calculate_hash(normalized_data, params.algorithm)
-        
-        # Compare with expected hash
-        match = calculated_hash.lower() == params.expected_hash.lower()
-        
-        # Prepare details
-        details = {
-            "algorithm": params.algorithm.value,
-            "input_type": params.input_type.value,
-            "normalization": params.normalization.value,
-            "calculated_hash": calculated_hash,
-            "expected_hash": params.expected_hash,
-            "match": match,
-            "input_size_bytes": len(data),
-            "normalized_size_bytes": len(normalized_data) if params.normalization != NormalizationType.NONE else len(data)
-        }
-        
-        if params.input_type == InputType.FILE:
-            details["file_path"] = params.input_data
-            details["file_size"] = os.path.getsize(params.input_data)
-        
-        # Prepare result
-        result = {
-            "match": match,
-            "calculated_hash": calculated_hash,
-            "expected_hash": params.expected_hash
-        }
-        
-        # Format response
-        if params.response_format == ResponseFormat.MARKDOWN:
-            operation = f"Hash Comparison: {params.algorithm.value}"
-            if match:
-                operation += " ✓ MATCH"
-            else:
-                operation += " ✗ MISMATCH"
-            return _format_result_markdown(operation, result, details)
-        else:
-            return _format_result_json(f"Hash Comparison: {params.algorithm.value}", result, details)
             
     except Exception as e:
         return f"Error: {str(e)}"

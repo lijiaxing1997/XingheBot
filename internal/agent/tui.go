@@ -888,7 +888,9 @@ func (m *tuiModel) runTurnEmail(runID string, userText string, baseHistory []llm
 	}
 
 	userTextForLLM := strings.TrimSpace(userText)
-	if userTextForLLM != "" {
+	// Email replies historically waited for completion so the user receives a final answer in one email.
+	// But if the user explicitly requests async/non-blocking behavior, honor that and do not force waits.
+	if userTextForLLM != "" && !userExplicitlyDeclinesBlockingWait(userTextForLLM) && !userExplicitlyRequestsBlockingWait(userTextForLLM) {
 		userTextForLLM += "\n\n等待完成后告诉我最终结果。"
 	}
 

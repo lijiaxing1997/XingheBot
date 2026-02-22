@@ -62,6 +62,12 @@
 - 随后主 Agent 会基于该 `[System Message]` + 主对话上下文，自动生成一条**用户可读**的综合回复（避免直接 dump 原始日志）。
 - 去重依赖 run 的 `ui_state.json`（`reported_agent_results`），避免重复通知。
 
+### 4.1.1 Email Gateway（可选）的等待行为
+
+如果启用了 Email Gateway，系统默认会倾向于“等子 Agent 完成后再回复一封最终结果邮件”（便于一次性拿到完整答案）。
+
+当你在邮件里明确写了“不要等待 / 不用等待 / 异步 / 不阻塞 / 任务下发后就返回”等表达时，主 Agent 会改为**非阻塞**：仅下发任务并立即回复 `run_id/agent_id`，不会调用 `agent_wait`。
+
 ### 4.2 默认完成信号：`agent_finished`
 
 worker 在结束时会自动向 run-level signals 发布 `agent_finished`（payload 包含 `agent_id/status/finished_at/result_path/output_preview` 等）。

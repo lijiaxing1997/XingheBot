@@ -13,22 +13,15 @@ from calculator_mcp import (
     calculator_trigonometric,
     calculator_statistics,
     calculator_unit_conversion,
-    calculator_hash_calculation,
-    calculator_hash_comparison,
     BasicOperationInput,
     AdvancedMathInput,
     TrigonometricInput,
     StatisticsInput,
     UnitConversionInput,
-    HashCalculationInput,
-    HashComparisonInput,
     OperationType,
     AdvancedOperationType,
     TrigonometricOperationType,
     UnitType,
-    HashAlgorithm,
-    InputType,
-    NormalizationType,
     ResponseFormat,
     TemperatureUnit,
     LengthUnit,
@@ -174,68 +167,6 @@ async def test_unit_conversion():
     print(result[:200] + "..." if len(result) > 200 else result)
     print()
 
-async def test_hash_calculation():
-    '''Test hash calculations.'''
-    print("=== Testing Hash Calculations ===")
-    
-    # Test SHA256 of text
-    params = HashCalculationInput(
-        algorithm=HashAlgorithm.SHA256,
-        input_type=InputType.TEXT,
-        input_data="Hello, World!",
-        normalization=NormalizationType.NONE,
-        response_format=ResponseFormat.MARKDOWN
-    )
-    result = await calculator_hash_calculation(params)
-    print("SHA256 of 'Hello, World!':")
-    print(result[:200] + "..." if len(result) > 200 else result)
-    print()
-    
-    # Test MD5 with JSON normalization
-    params = HashCalculationInput(
-        algorithm=HashAlgorithm.MD5,
-        input_type=InputType.TEXT,
-        input_data='{"b": 2, "a": 1, "c": 3}',
-        normalization=NormalizationType.JSON,
-        response_format=ResponseFormat.JSON
-    )
-    result = await calculator_hash_calculation(params)
-    print("MD5 of normalized JSON:")
-    print(result[:200] + "..." if len(result) > 200 else result)
-    print()
-
-async def test_hash_comparison():
-    '''Test hash comparisons.'''
-    print("=== Testing Hash Comparisons ===")
-    
-    # Test matching hash
-    params = HashComparisonInput(
-        algorithm=HashAlgorithm.SHA256,
-        input_type=InputType.TEXT,
-        input_data="Hello, World!",
-        expected_hash="dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f",
-        normalization=NormalizationType.NONE,
-        response_format=ResponseFormat.MARKDOWN
-    )
-    result = await calculator_hash_comparison(params)
-    print("Hash comparison (should match):")
-    print(result[:200] + "..." if len(result) > 200 else result)
-    print()
-    
-    # Test mismatching hash
-    params = HashComparisonInput(
-        algorithm=HashAlgorithm.SHA256,
-        input_type=InputType.TEXT,
-        input_data="Hello, World!",
-        expected_hash="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        normalization=NormalizationType.NONE,
-        response_format=ResponseFormat.JSON
-    )
-    result = await calculator_hash_comparison(params)
-    print("Hash comparison (should mismatch) JSON:")
-    print(result[:200] + "..." if len(result) > 200 else result)
-    print()
-
 async def main():
     '''Run all tests.'''
     print("Starting Calculator MCP Server Tests...\n")
@@ -245,8 +176,6 @@ async def main():
     await test_trigonometric()
     await test_statistics()
     await test_unit_conversion()
-    await test_hash_calculation()
-    await test_hash_comparison()
     
     print("All tests completed!")
 

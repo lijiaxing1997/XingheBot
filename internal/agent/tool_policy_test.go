@@ -30,6 +30,13 @@ func TestTurnToolPolicy_AllowsWaitWhenExplicit(t *testing.T) {
 	}
 }
 
+func TestTurnToolPolicy_DontWaitOverridesWaitPhrase(t *testing.T) {
+	p := newTurnToolPolicy(PromptModeChat, ChatToolModeDispatcher, "不用等完成再告诉我结果")
+	if err := p.allowTool("agent_wait"); err == nil {
+		t.Fatalf("expected agent_wait blocked when user explicitly says not to wait")
+	}
+}
+
 func TestTurnToolPolicy_LimitsProgressPollingWhenNonBlocking(t *testing.T) {
 	p := newTurnToolPolicy(PromptModeChat, ChatToolModeDispatcher, "看一下进度")
 	for i := 0; i < 3; i++ {
