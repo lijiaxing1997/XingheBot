@@ -628,6 +628,10 @@ func (m *tuiModel) processGatewayEmail(in gateway.EmailInbound) {
 	}
 
 	subjectKey := normalizeEmailSubject(in.Subject)
+	replySubject := strings.TrimSpace(in.Subject)
+	if replySubject == "" {
+		replySubject = subjectKey
+	}
 	runID, err := m.ensureEmailSession(subjectKey)
 	if err != nil {
 		m.notice = err.Error()
@@ -636,6 +640,7 @@ func (m *tuiModel) processGatewayEmail(in gateway.EmailInbound) {
 	}
 
 	userText := strings.TrimSpace(in.Body)
+	userText = trimQuotedReplyBody(userText)
 	if userText == "" {
 		userText = strings.TrimSpace(in.Subject)
 	}
@@ -662,7 +667,12 @@ func (m *tuiModel) processGatewayEmail(in gateway.EmailInbound) {
 	m.stickToBottom = true
 	m.cursorLine = -1
 	m.rerender()
-	go m.runTurnEmail(runID, userText, base, subjectKey, in.From)
+	thread := gateway.EmailThreadContext{
+		MessageID:  in.MessageID,
+		InReplyTo:  in.InReplyTo,
+		References: in.References,
+	}
+	go m.runTurnEmail(runID, userText, base, replySubject, in.From, thread)
 }
 
 func (m *tuiModel) ensureEmailSession(subjectKey string) (string, error) {
@@ -833,7 +843,28 @@ func stripASCIISubjectTag(subject string, tag string) (string, bool) {
 	}
 }
 
-func (m *tuiModel) runTurnEmail(runID string, userText string, baseHistory []llm.Message, subjectKey string, replyTo string) {
+func trimQuotedReplyBody(body string) string {
+	text := strings.TrimSpace(body)
+	if text == "" {
+		return ""
+	}
+	markers := []string{
+		"---- 回复的原邮件 ----",
+		"----回复的原邮件----",
+	}
+	cut := -1
+	for _, m := range markers {
+		if idx := strings.Index(text, m); idx >= 0 && (cut < 0 || idx < cut) {
+			cut = idx
+		}
+	}
+	if cut >= 0 {
+		text = strings.TrimSpace(text[:cut])
+	}
+	return text
+}
+
+func (m *tuiModel) runTurnEmail(runID string, userText string, baseHistory []llm.Message, replySubject string, replyTo string, thread gateway.EmailThreadContext) {
 	events := m.events
 	agentRef := m.agent
 	ctx := m.ctx
@@ -878,13 +909,13 @@ func (m *tuiModel) runTurnEmail(runID string, userText string, baseHistory []llm
 	if gw == nil || strings.TrimSpace(replyTo) == "" {
 		return
 	}
-	if strings.TrimSpace(subjectKey) == "" {
-		subjectKey = "(无主题)"
+	if strings.TrimSpace(replySubject) == "" {
+		replySubject = "(无主题)"
 	}
 
 	replyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := gw.SendReply(replyCtx, replyTo, subjectKey, finalText); err != nil {
+	if err := gw.SendReply(replyCtx, replyTo, replySubject, finalText, thread); err != nil {
 		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
 	}
 }

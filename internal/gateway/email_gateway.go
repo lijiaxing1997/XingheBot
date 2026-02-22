@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net"
 	"net/smtp"
+	"regexp"
 	"strings"
 	"time"
 
@@ -30,14 +31,22 @@ type EmailStatus struct {
 	CheckedAt time.Time
 }
 
+type EmailThreadContext struct {
+	MessageID  string
+	InReplyTo  string
+	References []string
+}
+
 type EmailInbound struct {
-	MessageID string
-	UID       uint32
-	From      string
-	FromName  string
-	Subject   string
-	Body      string
-	Date      time.Time
+	MessageID  string
+	InReplyTo  string
+	References []string
+	UID        uint32
+	From       string
+	FromName   string
+	Subject    string
+	Body       string
+	Date       time.Time
 }
 
 func init() {
@@ -291,23 +300,32 @@ func parseInbound(msg *imap.Message, section *imap.BodySectionName) (EmailInboun
 		}
 		fromAddr, fromName := envelopeSender(msg)
 		messageID := ""
+		inReplyTo := ""
 		if msg.Envelope != nil {
 			messageID = strings.TrimSpace(msg.Envelope.MessageId)
+			inReplyTo = strings.TrimSpace(msg.Envelope.InReplyTo)
 		}
-		messageID = strings.Trim(messageID, "<>")
+		messageID = canonicalMessageID(messageID)
+		inReplyTo = parseSingleMessageID(inReplyTo)
+		if inReplyTo == "" {
+			inReplyTo = parseSingleMessageID(extractHeaderValueFallback(raw, "In-Reply-To"))
+		}
 		date := time.Time{}
 		if msg.Envelope != nil {
 			date = msg.Envelope.Date
 		}
+		refs := parseMessageIDList(extractHeaderValueFallback(raw, "References"))
 		body := extractBodyFallback(raw)
 		return EmailInbound{
-			MessageID: messageID,
-			UID:       msg.Uid,
-			From:      fromAddr,
-			FromName:  fromName,
-			Subject:   subject,
-			Body:      body,
-			Date:      date,
+			MessageID:  messageID,
+			InReplyTo:  inReplyTo,
+			References: refs,
+			UID:        msg.Uid,
+			From:       fromAddr,
+			FromName:   fromName,
+			Subject:    subject,
+			Body:       body,
+			Date:       date,
 		}, true
 	}
 
@@ -344,7 +362,14 @@ func parseInbound(msg *imap.Message, section *imap.BodySectionName) (EmailInboun
 	if messageID == "" && msg.Envelope != nil {
 		messageID = strings.TrimSpace(msg.Envelope.MessageId)
 	}
-	messageID = strings.Trim(messageID, "<>")
+	messageID = canonicalMessageID(messageID)
+
+	inReplyTo := parseSingleMessageID(reader.Header.Get("In-Reply-To"))
+	if inReplyTo == "" && msg.Envelope != nil && strings.TrimSpace(msg.Envelope.InReplyTo) != "" {
+		inReplyTo = parseSingleMessageID(msg.Envelope.InReplyTo)
+	}
+
+	refs := parseMessageIDList(reader.Header.Get("References"))
 
 	date, _ := reader.Header.Date()
 	if date.IsZero() && msg.Envelope != nil && !msg.Envelope.Date.IsZero() {
@@ -354,13 +379,15 @@ func parseInbound(msg *imap.Message, section *imap.BodySectionName) (EmailInboun
 	body := extractTextBody(reader)
 
 	return EmailInbound{
-		MessageID: messageID,
-		UID:       msg.Uid,
-		From:      fromAddr,
-		FromName:  fromName,
-		Subject:   subject,
-		Body:      body,
-		Date:      date,
+		MessageID:  messageID,
+		InReplyTo:  inReplyTo,
+		References: refs,
+		UID:        msg.Uid,
+		From:       fromAddr,
+		FromName:   fromName,
+		Subject:    subject,
+		Body:       body,
+		Date:       date,
 	}, true
 }
 
@@ -464,7 +491,7 @@ func (g *EmailGateway) markSeen(c *client.Client, seqNum uint32) error {
 	return c.Store(seqset, item, flags, nil)
 }
 
-func (g *EmailGateway) SendReply(ctx context.Context, to string, subject string, body string) error {
+func (g *EmailGateway) SendReply(ctx context.Context, to string, subject string, body string, thread EmailThreadContext) error {
 	if g == nil {
 		return errors.New("email gateway is nil")
 	}
@@ -517,7 +544,13 @@ func (g *EmailGateway) SendReply(ctx context.Context, to string, subject string,
 	}
 
 	subjectEncoded := mime.QEncoding.Encode("utf-8", subject)
-	msg := buildTextEmail(from, to, subjectEncoded, body)
+	threadInReplyTo := canonicalMessageID(thread.MessageID)
+	baseRefs := append([]string(nil), thread.References...)
+	if len(baseRefs) == 0 && strings.TrimSpace(thread.InReplyTo) != "" {
+		baseRefs = append(baseRefs, canonicalMessageID(thread.InReplyTo))
+	}
+	threadRefs := buildReferencesForReply(baseRefs, threadInReplyTo)
+	msg := buildTextEmail(from, to, subjectEncoded, body, threadInReplyTo, threadRefs)
 	if _, err := w.Write([]byte(msg)); err != nil {
 		return fmt.Errorf("smtp write failed: %w", err)
 	}
@@ -527,7 +560,7 @@ func (g *EmailGateway) SendReply(ctx context.Context, to string, subject string,
 	return nil
 }
 
-func buildTextEmail(from string, to string, subject string, body string) string {
+func buildTextEmail(from string, to string, subject string, body string, inReplyTo string, references []string) string {
 	if strings.TrimSpace(body) == "" {
 		body = "(empty)"
 	}
@@ -538,12 +571,157 @@ func buildTextEmail(from string, to string, subject string, body string) string 
 		"From: " + from,
 		"To: " + to,
 		"Subject: " + subject,
+	}
+	if v := formatMessageID(inReplyTo); v != "" {
+		headers = append(headers, "In-Reply-To: "+v)
+	}
+	if refs := formatReferencesHeaderValue(references); refs != "" {
+		headers = append(headers, "References: "+refs)
+	}
+	headers = append(headers,
 		"MIME-Version: 1.0",
 		"Content-Type: text/plain; charset=UTF-8",
 		"Content-Transfer-Encoding: 8bit",
-		"Date: " + time.Now().Format(time.RFC1123Z),
-	}
+		"Date: "+time.Now().Format(time.RFC1123Z),
+	)
 	return strings.Join(headers, "\r\n") + "\r\n\r\n" + body + "\r\n"
+}
+
+var messageIDAngleRe = regexp.MustCompile(`<([^>]+)>`)
+
+func canonicalMessageID(messageID string) string {
+	return strings.Trim(strings.TrimSpace(messageID), "<>")
+}
+
+func formatMessageID(messageID string) string {
+	id := canonicalMessageID(messageID)
+	if id == "" {
+		return ""
+	}
+	return "<" + id + ">"
+}
+
+func parseSingleMessageID(headerValue string) string {
+	list := parseMessageIDList(headerValue)
+	if len(list) == 0 {
+		return ""
+	}
+	return list[0]
+}
+
+func parseMessageIDList(headerValue string) []string {
+	v := strings.TrimSpace(headerValue)
+	if v == "" {
+		return nil
+	}
+	v = strings.ReplaceAll(v, "\r", " ")
+	v = strings.ReplaceAll(v, "\n", " ")
+
+	var out []string
+	seen := make(map[string]bool)
+
+	matches := messageIDAngleRe.FindAllStringSubmatch(v, -1)
+	if len(matches) > 0 {
+		for _, m := range matches {
+			if len(m) < 2 {
+				continue
+			}
+			id := canonicalMessageID(m[1])
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			out = append(out, id)
+		}
+		return out
+	}
+
+	// Fallback: split on whitespace and trim common delimiters.
+	for _, tok := range strings.Fields(v) {
+		id := strings.TrimSpace(tok)
+		id = strings.Trim(id, "<>,;")
+		id = canonicalMessageID(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+func buildReferencesForReply(inboundRefs []string, inboundMessageID string) []string {
+	ids := make([]string, 0, len(inboundRefs)+1)
+	ids = append(ids, inboundRefs...)
+	if mid := canonicalMessageID(inboundMessageID); mid != "" {
+		ids = append(ids, mid)
+	}
+
+	out := make([]string, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		id = canonicalMessageID(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+func formatReferencesHeaderValue(refs []string) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(refs))
+	for _, id := range refs {
+		if v := formatMessageID(id); v != "" {
+			parts = append(parts, v)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func extractHeaderValueFallback(raw []byte, name string) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	key := strings.ToLower(strings.TrimSpace(name))
+	if key == "" {
+		return ""
+	}
+
+	text := string(raw)
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	if idx := strings.Index(text, "\n\n"); idx >= 0 {
+		text = text[:idx]
+	}
+	lines := strings.Split(text, "\n")
+
+	var valueParts []string
+	capturing := false
+	for _, line := range lines {
+		if capturing {
+			if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
+				valueParts = append(valueParts, strings.TrimSpace(line))
+				continue
+			}
+			break
+		}
+		colon := strings.IndexByte(line, ':')
+		if colon < 0 {
+			continue
+		}
+		k := strings.ToLower(strings.TrimSpace(line[:colon]))
+		if k != key {
+			continue
+		}
+		capturing = true
+		valueParts = append(valueParts, strings.TrimSpace(line[colon+1:]))
+	}
+	return strings.TrimSpace(strings.Join(valueParts, " "))
 }
 
 func minDuration(a, b time.Duration) time.Duration {
