@@ -134,6 +134,7 @@ func runChat(args []string) error {
 	case "", "tui":
 		err = ag.RunInteractiveTUI(context.Background(), os.Stdin, os.Stdout, agent.TUIOptions{
 			Coordinator: rt.Coordinator,
+			ConfigPath:  *configPath,
 		})
 	default:
 		fmt.Printf("%s ready. Type /mcp reload to refresh MCP servers, /restart to relaunch, or /exit to quit.\n", appinfo.Display())

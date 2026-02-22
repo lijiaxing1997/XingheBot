@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -22,6 +23,7 @@ import (
 	"golang.org/x/term"
 
 	"test_skill_agent/internal/appinfo"
+	"test_skill_agent/internal/gateway"
 	"test_skill_agent/internal/llm"
 	"test_skill_agent/internal/multiagent"
 	"test_skill_agent/internal/restart"
@@ -44,6 +46,7 @@ const (
 
 type TUIOptions struct {
 	Coordinator *multiagent.Coordinator
+	ConfigPath  string
 }
 
 func (a *Agent) RunInteractiveTUI(ctx context.Context, in io.Reader, out io.Writer, opts TUIOptions) error {
@@ -60,7 +63,13 @@ func (a *Agent) RunInteractiveTUI(ctx context.Context, in io.Reader, out io.Writ
 		}
 	}
 
-	model := newTUIModel(ctx, a, opts.Coordinator)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	model := newTUIModel(ctx, a, opts.Coordinator, strings.TrimSpace(opts.ConfigPath))
 	prog := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),
@@ -80,6 +89,14 @@ type tuiModel struct {
 
 	width  int
 	height int
+
+	gatewayConfigPath string
+	emailGateway      *gateway.EmailGateway
+	gatewayEnabled    bool
+	gatewayEmail      string
+	gatewayStatus     gateway.EmailStatus
+	gatewayInbox      []gateway.EmailInbound
+	startGatewayOnce  sync.Once
 
 	sessions      []multiagent.RunManifest
 	sessionIndex  int
@@ -163,7 +180,15 @@ type tuiSetNoticeMsg struct {
 	Text string
 }
 
-func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator) tuiModel {
+type tuiGatewayStatusMsg struct {
+	Status gateway.EmailStatus
+}
+
+type tuiGatewayInboundMsg struct {
+	Msg gateway.EmailInbound
+}
+
+func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator, configPath string) tuiModel {
 	inp := textinput.New()
 	inp.Placeholder = "Type a message…"
 	inp.Prompt = "› "
@@ -178,19 +203,45 @@ func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator) t
 		banner = strings.TrimSpace(a.StartupBanner)
 	}
 
+	enabled := false
+	var gcfg gateway.GatewayConfig
+	if strings.TrimSpace(configPath) != "" {
+		if loaded, err := gateway.LoadGatewayConfig(configPath); err == nil {
+			gcfg = loaded
+			enabled = loaded.Enabled
+		} else {
+			enabled = false
+			if banner != "" {
+				banner += " | "
+			}
+			banner += "Gateway config load failed: " + err.Error()
+		}
+	}
+
+	var emailGateway *gateway.EmailGateway
+	emailAddr := ""
+	if enabled {
+		emailGateway = gateway.NewEmailGateway(gcfg.Email)
+		emailAddr = strings.TrimSpace(gcfg.Email.EmailAddress)
+	}
+
 	return tuiModel{
-		ctx:           ctx,
-		agent:         a,
-		coord:         coord,
-		events:        make(chan tuiAsyncMsg, 512),
-		input:         inp,
-		viewport:      vp,
-		sessionData:   make(map[string]*tuiSessionData),
-		expandedTools: make(map[string]bool),
-		cursorLine:    -1,
-		stickToBottom: true,
-		showDone:      false,
-		banner:        banner,
+		ctx:               ctx,
+		agent:             a,
+		coord:             coord,
+		events:            make(chan tuiAsyncMsg, 512),
+		input:             inp,
+		viewport:          vp,
+		sessionData:       make(map[string]*tuiSessionData),
+		expandedTools:     make(map[string]bool),
+		cursorLine:        -1,
+		stickToBottom:     true,
+		showDone:          false,
+		banner:            banner,
+		gatewayConfigPath: strings.TrimSpace(configPath),
+		emailGateway:      emailGateway,
+		gatewayEnabled:    enabled,
+		gatewayEmail:      emailAddr,
 	}
 }
 
@@ -201,6 +252,40 @@ func (m tuiModel) Init() tea.Cmd {
 		tuiTickCmd(),
 		waitAsyncCmd(m.events),
 	)
+}
+
+func (m *tuiModel) startGateway() {
+	if m == nil {
+		return
+	}
+	m.startGatewayOnce.Do(func() {
+		if !m.gatewayEnabled || m.emailGateway == nil {
+			return
+		}
+		m.gatewayStatus = gateway.EmailStatus{
+			OK:        false,
+			Error:     "connecting…",
+			CheckedAt: time.Now().UTC(),
+		}
+		ctx := m.ctx
+		events := m.events
+		gw := m.emailGateway
+		go func() {
+			err := gw.Run(ctx,
+				func(st gateway.EmailStatus) {
+					events <- tuiAsyncMsg{Event: tuiGatewayStatusMsg{Status: st}}
+				},
+				func(in gateway.EmailInbound) {
+					events <- tuiAsyncMsg{Event: tuiGatewayInboundMsg{Msg: in}}
+				},
+			)
+			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				events <- tuiAsyncMsg{Event: tuiGatewayStatusMsg{
+					Status: gateway.EmailStatus{OK: false, Error: err.Error(), CheckedAt: time.Now().UTC()},
+				}}
+			}
+		}()
+	})
 }
 
 func tuiTickCmd() tea.Cmd {
@@ -252,6 +337,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitAsyncCmd(m.events)
 	case tuiInitMsg:
 		m.loading = true
+		m.startGateway()
 		return m, nil
 	case tuiSessionsLoadedMsg:
 		m.loading = false
@@ -297,6 +383,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshAgentIDs()
 		m.maybeAutoFollowup()
+		m.maybeProcessGatewayInbox()
 		m.rerender()
 		return m, tuiTickCmd()
 	case tuiSessionCreatedMsg:
@@ -517,6 +604,291 @@ func (m *tuiModel) maybeAutoFollowup() {
 	go m.runAutoFollowup(runID, base)
 }
 
+func (m *tuiModel) maybeProcessGatewayInbox() {
+	if m == nil {
+		return
+	}
+	if m.busy {
+		return
+	}
+	if len(m.gatewayInbox) == 0 {
+		return
+	}
+	msg := m.gatewayInbox[0]
+	m.gatewayInbox = m.gatewayInbox[1:]
+	m.processGatewayEmail(msg)
+}
+
+func (m *tuiModel) processGatewayEmail(in gateway.EmailInbound) {
+	if m == nil || m.coord == nil || m.agent == nil {
+		return
+	}
+	if strings.TrimSpace(in.From) == "" {
+		return
+	}
+
+	subjectKey := normalizeEmailSubject(in.Subject)
+	runID, err := m.ensureEmailSession(subjectKey)
+	if err != nil {
+		m.notice = err.Error()
+		m.rerender()
+		return
+	}
+
+	userText := strings.TrimSpace(in.Body)
+	if userText == "" {
+		userText = strings.TrimSpace(in.Subject)
+	}
+	if userText == "" {
+		userText = "(empty email)"
+	}
+
+	m.ensureSessionLoaded(runID)
+	m.createPrimaryAgent(runID)
+	sess := m.sessionData[runID]
+	if sess == nil {
+		m.notice = "failed to load session"
+		m.rerender()
+		return
+	}
+	base := append([]llm.Message(nil), sess.History...)
+
+	userMsg := llm.Message{Role: "user", Content: userText}
+	sess.History = append(sess.History, userMsg)
+	_ = appendJSONL(sess.HistoryPath, userMsg)
+
+	m.busy = true
+	m.notice = ""
+	m.stickToBottom = true
+	m.cursorLine = -1
+	m.rerender()
+	go m.runTurnEmail(runID, userText, base, subjectKey, in.From)
+}
+
+func (m *tuiModel) ensureEmailSession(subjectKey string) (string, error) {
+	key := strings.TrimSpace(subjectKey)
+	if key == "" {
+		key = "(无主题)"
+	}
+
+	// Try to find an existing session by title (email subject key).
+	for i, run := range m.sessions {
+		if strings.TrimSpace(multiagent.RunTitle(run)) != key {
+			continue
+		}
+		m.sessionIndex = i
+		m.sessionCursor = i
+		m.ensureSessionLoaded(run.ID)
+		m.createPrimaryAgent(run.ID)
+		m.refreshAgentIDs()
+		m.cursorLine = -1
+		m.stickToBottom = true
+		m.rerender()
+		return run.ID, nil
+	}
+
+	// Compatibility: some email clients auto-prefix reply/forward subjects, e.g.
+	// "回复：" / "Re:" / "Fwd:".
+	for i, run := range m.sessions {
+		title := strings.TrimSpace(multiagent.RunTitle(run))
+		if title == "" || title == key {
+			continue
+		}
+		if normalizeEmailSubject(title) != key {
+			continue
+		}
+		m.sessionIndex = i
+		m.sessionCursor = i
+		m.ensureSessionLoaded(run.ID)
+		m.createPrimaryAgent(run.ID)
+		m.refreshAgentIDs()
+		m.cursorLine = -1
+		m.stickToBottom = true
+		m.rerender()
+		return run.ID, nil
+	}
+
+	// Create a new session.
+	run, err := m.coord.CreateRun("", map[string]any{
+		"source":  "email",
+		"subject": key,
+	})
+	if err != nil {
+		return "", err
+	}
+	updated := run
+	if titled, err := m.coord.SetRunTitle(run.ID, key); err == nil {
+		updated = titled
+	}
+
+	m.sessions = append([]multiagent.RunManifest{updated}, m.sessions...)
+	m.sessionIndex = 0
+	m.sessionCursor = 0
+	m.ensureSessionLoaded(updated.ID)
+	m.createPrimaryAgent(updated.ID)
+	m.refreshAgentIDs()
+	m.cursorLine = -1
+	m.stickToBottom = true
+	m.rerender()
+	return updated.ID, nil
+}
+
+func normalizeEmailSubject(subject string) string {
+	s := strings.TrimSpace(subject)
+	if s == "" {
+		return "(无主题)"
+	}
+	for {
+		trimmed := strings.TrimSpace(s)
+		if trimmed == "" {
+			return "(无主题)"
+		}
+		next, changed := stripEmailSubjectPrefixes(trimmed)
+		if !changed {
+			return trimmed
+		}
+		s = next
+	}
+}
+
+func stripEmailSubjectPrefixes(subject string) (string, bool) {
+	s := strings.TrimSpace(subject)
+	if s == "" {
+		return s, false
+	}
+
+	// Common Chinese prefixes: "回复：" / "转发：" etc.
+	for _, tag := range []string{"回复", "答复", "转发"} {
+		if next, ok := stripCJKSubjectTag(s, tag); ok {
+			return next, true
+		}
+	}
+
+	// Common ASCII prefixes: Re:/Fw:/Fwd: (including "Re[2]:" / "Re(2):", and both ':'/'：').
+	for _, tag := range []string{"re", "fw", "fwd"} {
+		if next, ok := stripASCIISubjectTag(s, tag); ok {
+			return next, true
+		}
+	}
+
+	return s, false
+}
+
+func stripCJKSubjectTag(subject string, tag string) (string, bool) {
+	if strings.TrimSpace(tag) == "" {
+		return subject, false
+	}
+	if !strings.HasPrefix(subject, tag) {
+		return subject, false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(subject, tag))
+	if rest == "" {
+		return "", true
+	}
+	switch {
+	case strings.HasPrefix(rest, ":"):
+		rest = strings.TrimSpace(rest[1:])
+		return rest, true
+	case strings.HasPrefix(rest, "："):
+		rest = strings.TrimSpace(strings.TrimPrefix(rest, "："))
+		return rest, true
+	default:
+		// Some clients omit the colon but still prepend the tag.
+		return rest, true
+	}
+}
+
+func stripASCIISubjectTag(subject string, tag string) (string, bool) {
+	if strings.TrimSpace(tag) == "" {
+		return subject, false
+	}
+	lower := strings.ToLower(subject)
+	if !strings.HasPrefix(lower, tag) {
+		return subject, false
+	}
+
+	rest := subject[len(tag):]
+	rest = strings.TrimLeft(rest, " \t")
+
+	// Optional counter: Re[2]: / Re(2):
+	if len(rest) > 0 && (rest[0] == '[' || rest[0] == '(') {
+		close := byte(']')
+		if rest[0] == '(' {
+			close = ')'
+		}
+		if idx := strings.IndexByte(rest, close); idx > 0 && idx <= 12 {
+			rest = rest[idx+1:]
+			rest = strings.TrimLeft(rest, " \t")
+		}
+	}
+
+	// Must have a colon delimiter to qualify as a prefix.
+	switch {
+	case strings.HasPrefix(rest, ":"):
+		return strings.TrimSpace(rest[1:]), true
+	case strings.HasPrefix(rest, "："):
+		return strings.TrimSpace(strings.TrimPrefix(rest, "：")), true
+	default:
+		return subject, false
+	}
+}
+
+func (m *tuiModel) runTurnEmail(runID string, userText string, baseHistory []llm.Message, subjectKey string, replyTo string) {
+	events := m.events
+	agentRef := m.agent
+	ctx := m.ctx
+	gw := m.emailGateway
+
+	defer func() {
+		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{Busy: false}}
+	}()
+
+	var finalText string
+	emit := func(msg llm.Message) {
+		events <- tuiAsyncMsg{Event: tuiAppendHistoryMsg{
+			RunID: runID,
+			Msg:   msg,
+		}}
+		if strings.EqualFold(strings.TrimSpace(msg.Role), "assistant") && len(msg.ToolCalls) == 0 {
+			if t := strings.TrimSpace(msg.Content); t != "" {
+				finalText = t
+			}
+		}
+	}
+
+	userTextForLLM := strings.TrimSpace(userText)
+	if userTextForLLM != "" {
+		userTextForLLM += "\n\n等待完成后告诉我最终结果。"
+	}
+
+	err := runTUITurnStreaming(ctx, agentRef, runID, userTextForLLM, baseHistory, emit)
+	if err != nil {
+		if finalText == "" {
+			finalText = "ERROR: " + err.Error()
+		} else {
+			finalText += "\n\nERROR: " + err.Error()
+		}
+		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
+	}
+
+	if strings.TrimSpace(finalText) == "" {
+		finalText = "(no output)"
+	}
+
+	if gw == nil || strings.TrimSpace(replyTo) == "" {
+		return
+	}
+	if strings.TrimSpace(subjectKey) == "" {
+		subjectKey = "(无主题)"
+	}
+
+	replyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := gw.SendReply(replyCtx, replyTo, subjectKey, finalText); err != nil {
+		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
+	}
+}
+
 func (m *tuiModel) buildAutoFollowupSystemMessage(runID string, states []multiagent.AgentState, now time.Time) (string, map[string]int) {
 	previews := make(map[string]int, len(states))
 	var b strings.Builder
@@ -638,6 +1010,9 @@ func (m *tuiModel) handleAsyncEvent(evt tea.Msg) {
 		}
 	case tuiSetBusyMsg:
 		m.busy = msg.Busy
+		if !m.busy {
+			m.maybeProcessGatewayInbox()
+		}
 	case tuiSetNoticeMsg:
 		m.notice = strings.TrimSpace(msg.Text)
 	case tuiRunManifestUpdatedMsg:
@@ -658,6 +1033,11 @@ func (m *tuiModel) handleAsyncEvent(evt tea.Msg) {
 				break
 			}
 		}
+	case tuiGatewayStatusMsg:
+		m.gatewayStatus = msg.Status
+	case tuiGatewayInboundMsg:
+		m.gatewayInbox = append(m.gatewayInbox, msg.Msg)
+		m.maybeProcessGatewayInbox()
 	default:
 	}
 }
@@ -775,6 +1155,9 @@ func (m *tuiModel) resize() {
 	midW := max(0, m.width-leftW-rightW)
 
 	headerH := 3
+	if strings.TrimSpace(m.gatewayConfigPath) != "" {
+		headerH = 4
+	}
 	inputH := 1
 	vpH := max(0, m.height-headerH-inputH)
 	m.viewport.Width = max(0, midW-2)
@@ -2002,24 +2385,72 @@ func (m *tuiModel) renderCenter(width int, height int) string {
 		sessionID = "-"
 	}
 	subHeader := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(fmt.Sprintf("Session: %s | Agent: %s", sessionID, m.currentAgentID()))
-	infoLine := ""
+	infoLines := make([]string, 0, 2)
 	if strings.TrimSpace(m.notice) != "" {
-		infoLine = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(
+		infoLines = append(infoLines, lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(
 			truncateANSI("Error: "+strings.TrimSpace(m.notice), max(10, width-2)),
-		)
+		))
 	} else if strings.TrimSpace(m.banner) != "" {
-		infoLine = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(
+		infoLines = append(infoLines, lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(
 			truncateANSI(strings.TrimSpace(m.banner), max(10, width-2)),
-		)
+		))
 	}
 
-	headerBlock := lipgloss.NewStyle().Padding(0, 1).Render(strings.Join([]string{header, subHeader, infoLine}, "\n"))
+	gatewayLine := m.renderGatewayLine(width)
+	if gatewayLine != "" {
+		infoLines = append(infoLines, gatewayLine)
+	}
+
+	headerParts := []string{header, subHeader}
+	headerParts = append(headerParts, infoLines...)
+	headerBlock := lipgloss.NewStyle().Padding(0, 1).Render(strings.Join(headerParts, "\n"))
 
 	vp := m.viewport.View()
 	inputLine := m.renderInputLine(width)
 
 	content := lipgloss.JoinVertical(lipgloss.Left, headerBlock, vp, inputLine)
 	return border.Render(content)
+}
+
+func (m *tuiModel) renderGatewayLine(width int) string {
+	if m == nil {
+		return ""
+	}
+	if strings.TrimSpace(m.gatewayConfigPath) == "" {
+		return ""
+	}
+
+	maxW := max(10, width-2)
+	queueN := len(m.gatewayInbox)
+	queueText := ""
+	if queueN > 0 {
+		queueText = fmt.Sprintf(" | 待处理: %d", queueN)
+	}
+
+	if !m.gatewayEnabled || m.emailGateway == nil {
+		text := "消息网关：已禁用" + queueText
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(truncateANSI(text, maxW))
+	}
+
+	emailAddr := strings.TrimSpace(m.gatewayEmail)
+	if emailAddr == "" {
+		emailAddr = strings.TrimSpace(m.emailGateway.Config().EmailAddress)
+	}
+	interval := m.emailGateway.Config().PollIntervalSeconds
+	if interval <= 0 {
+		interval = 5
+	}
+
+	if m.gatewayStatus.OK {
+		text := fmt.Sprintf("消息网关：%s 连接正常 (轮询%ds)%s", emailAddr, interval, queueText)
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(truncateANSI(text, maxW))
+	}
+	errText := strings.TrimSpace(m.gatewayStatus.Error)
+	if errText == "" {
+		errText = "unknown error"
+	}
+	text := fmt.Sprintf("消息网关：%s 连接异常: %s%s", emailAddr, safeOneLine(errText, 120), queueText)
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(truncateANSI(text, maxW))
 }
 
 func (m *tuiModel) renderInputLine(width int) string {

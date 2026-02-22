@@ -4,6 +4,26 @@
   "base_url": "https://api.deepseek.com",
   "model": "deepseek-chat",
   "max_tokens": 0,
+  "网关配置": {
+    "enabled": false,
+    "email": {
+      "provider": "126",
+      "email_address": "xingheai@126.com",
+      "authorization_code": "REPLACE_ME",
+      "imap": {
+        "server": "imap.126.com",
+        "port": 993,
+        "use_ssl": true
+      },
+      "smtp": {
+        "server": "smtp.126.com",
+        "port": 465,
+        "use_ssl": true
+      },
+      "poll_interval_seconds": 5,
+      "allowed_senders": "jiaxingl@126.com"
+    }
+  },
   "multi_agent": {
     "cleanup": {
       "enabled": true,
