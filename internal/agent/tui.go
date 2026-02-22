@@ -523,12 +523,14 @@ func (m *tuiModel) maybeAutoFollowup() {
 	}
 
 	now := time.Now().UTC()
-	pending := make([]multiagent.AgentState, 0, 4)
+	allTerminal := true
+	pendingAll := make([]multiagent.AgentState, 0, 4)
 	for _, st := range states {
 		if strings.TrimSpace(st.AgentID) == "" || st.AgentID == tuiPrimaryAgentID {
 			continue
 		}
 		if !multiagent.IsTerminalStatus(st.Status) {
+			allTerminal = false
 			continue
 		}
 		finishedAt := st.FinishedAt
@@ -540,26 +542,27 @@ func (m *tuiModel) maybeAutoFollowup() {
 				continue
 			}
 		}
-		pending = append(pending, st)
+		pendingAll = append(pendingAll, st)
 	}
-	if len(pending) == 0 {
+	if len(pendingAll) == 0 {
 		return
 	}
-	sort.Slice(pending, func(i, j int) bool {
-		ai := pending[i].FinishedAt
-		aj := pending[j].FinishedAt
+	sort.Slice(pendingAll, func(i, j int) bool {
+		ai := pendingAll[i].FinishedAt
+		aj := pendingAll[j].FinishedAt
 		if ai.IsZero() {
-			ai = pending[i].UpdatedAt
+			ai = pendingAll[i].UpdatedAt
 		}
 		if aj.IsZero() {
-			aj = pending[j].UpdatedAt
+			aj = pendingAll[j].UpdatedAt
 		}
 		if ai.Equal(aj) {
-			return pending[i].AgentID < pending[j].AgentID
+			return pendingAll[i].AgentID < pendingAll[j].AgentID
 		}
 		return ai.Before(aj)
 	})
 
+	pending := pendingAll
 	if len(pending) > autoFollowupMaxAgentsPerTick {
 		pending = pending[:autoFollowupMaxAgentsPerTick]
 	}
@@ -596,12 +599,18 @@ func (m *tuiModel) maybeAutoFollowup() {
 	}
 
 	base := append([]llm.Message(nil), sess.History...)
+	var emailReply *autoFollowupEmailReply
+	if allTerminal && len(pendingAll) == len(pending) {
+		if reply, ok := m.loadAutoFollowupEmailReply(runID); ok {
+			emailReply = &reply
+		}
+	}
 	m.busy = true
 	m.notice = ""
 	m.stickToBottom = true
 	m.cursorLine = -1
 	m.rerender()
-	go m.runAutoFollowup(runID, base)
+	go m.runAutoFollowup(runID, base, emailReply)
 }
 
 func (m *tuiModel) maybeProcessGatewayInbox() {
@@ -672,7 +681,61 @@ func (m *tuiModel) processGatewayEmail(in gateway.EmailInbound) {
 		InReplyTo:  in.InReplyTo,
 		References: in.References,
 	}
+	m.recordGatewayEmailContext(runID, in.From, replySubject, thread)
 	go m.runTurnEmail(runID, userText, base, replySubject, in.From, thread)
+}
+
+func (m *tuiModel) recordGatewayEmailContext(runID string, replyTo string, replySubject string, thread gateway.EmailThreadContext) {
+	if m == nil || m.coord == nil {
+		return
+	}
+	id := strings.TrimSpace(runID)
+	if id == "" {
+		return
+	}
+	to := strings.TrimSpace(replyTo)
+	if to == "" {
+		return
+	}
+	subject := strings.TrimSpace(replySubject)
+	now := time.Now().UTC()
+
+	updated, err := m.coord.UpdateRun(id, func(run *multiagent.RunManifest) error {
+		if run == nil {
+			return nil
+		}
+		if run.Metadata == nil {
+			run.Metadata = make(map[string]any)
+		}
+		run.Metadata["source"] = "email"
+
+		emailMeta := map[string]any{}
+		if existing, ok := run.Metadata["email"].(map[string]any); ok && existing != nil {
+			emailMeta = existing
+		}
+		emailMeta["reply_to"] = to
+		if subject != "" {
+			emailMeta["reply_subject"] = subject
+		}
+		emailMeta["updated_at"] = now.Format(time.RFC3339)
+		emailMeta["thread"] = map[string]any{
+			"message_id": strings.TrimSpace(thread.MessageID),
+			"in_reply_to": strings.TrimSpace(thread.InReplyTo),
+			"references": thread.References,
+		}
+		run.Metadata["email"] = emailMeta
+		return nil
+	})
+	if err != nil {
+		m.notice = err.Error()
+		return
+	}
+	for i := range m.sessions {
+		if m.sessions[i].ID == updated.ID {
+			m.sessions[i] = updated
+			break
+		}
+	}
 }
 
 func (m *tuiModel) ensureEmailSession(subjectKey string) (string, error) {
@@ -894,7 +957,10 @@ func (m *tuiModel) runTurnEmail(runID string, userText string, baseHistory []llm
 		userTextForLLM += "\n\n等待完成后告诉我最终结果。"
 	}
 
-	err := runTUITurnStreaming(ctx, agentRef, runID, userTextForLLM, baseHistory, emit)
+	afterTool := func(call llm.ToolCall, result string, callErr error) []llm.Message {
+		return m.maybeBuildWaitCompletionSystemMessages(runID, call, result, callErr)
+	}
+	err := runTUITurnStreaming(ctx, agentRef, runID, userTextForLLM, baseHistory, emit, afterTool)
 	if err != nil {
 		if finalText == "" {
 			finalText = "ERROR: " + err.Error()
@@ -990,24 +1056,243 @@ func (m *tuiModel) buildAutoFollowupSystemMessage(runID string, states []multiag
 	return b.String(), previews
 }
 
-func (m *tuiModel) runAutoFollowup(runID string, baseHistory []llm.Message) {
+func (m *tuiModel) maybeBuildWaitCompletionSystemMessages(runID string, call llm.ToolCall, result string, callErr error) []llm.Message {
+	if m == nil || m.coord == nil {
+		return nil
+	}
+	if callErr != nil {
+		return nil
+	}
+	if strings.TrimSpace(call.Function.Name) != "agent_wait" {
+		return nil
+	}
+	raw := strings.TrimSpace(result)
+	if raw == "" || !json.Valid([]byte(raw)) {
+		return nil
+	}
+	var out struct {
+		TimedOut  bool                  `json:"timed_out"`
+		States    []multiagent.AgentState `json:"states"`
+		CheckedAt time.Time             `json:"checked_at"`
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	if out.TimedOut || len(out.States) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
+	if !out.CheckedAt.IsZero() {
+		now = out.CheckedAt
+	}
+
+	ui, err := m.coord.ReadRunUIState(runID)
+	if err != nil {
+		return nil
+	}
+
+	pending := make([]multiagent.AgentState, 0, len(out.States))
+	for _, st := range out.States {
+		if strings.TrimSpace(st.AgentID) == "" || st.AgentID == tuiPrimaryAgentID {
+			continue
+		}
+		if !multiagent.IsTerminalStatus(st.Status) {
+			continue
+		}
+		finishedAt := st.FinishedAt
+		if finishedAt.IsZero() {
+			finishedAt = st.UpdatedAt
+		}
+		if ui.ReportedAgentResults != nil {
+			if rec, ok := ui.ReportedAgentResults[st.AgentID]; ok && !rec.FinishedAt.IsZero() && finishedAt.Equal(rec.FinishedAt) {
+				continue
+			}
+		}
+		pending = append(pending, st)
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	sort.Slice(pending, func(i, j int) bool {
+		ai := pending[i].FinishedAt
+		aj := pending[j].FinishedAt
+		if ai.IsZero() {
+			ai = pending[i].UpdatedAt
+		}
+		if aj.IsZero() {
+			aj = pending[j].UpdatedAt
+		}
+		if ai.Equal(aj) {
+			return pending[i].AgentID < pending[j].AgentID
+		}
+		return ai.Before(aj)
+	})
+
+	subset := pending
+	if len(subset) > autoFollowupMaxAgentsPerTick {
+		subset = subset[:autoFollowupMaxAgentsPerTick]
+	}
+	content, previews := m.buildAutoFollowupSystemMessage(runID, subset, now)
+
+	reports := make([]multiagent.ReportedAgentResultRecord, 0, len(pending))
+	for _, st := range pending {
+		finishedAt := st.FinishedAt
+		if finishedAt.IsZero() {
+			finishedAt = st.UpdatedAt
+		}
+		if finishedAt.IsZero() {
+			finishedAt = now
+		}
+		resultPath := strings.TrimSpace(st.ResultPath)
+		if resultPath == "" {
+			resultPath = m.coord.AgentResultPath(runID, st.AgentID)
+		}
+		reports = append(reports, multiagent.ReportedAgentResultRecord{
+			AgentID:      st.AgentID,
+			Status:       st.Status,
+			FinishedAt:   finishedAt,
+			ResultPath:   resultPath,
+			Error:        st.Error,
+			PreviewChars: previews[st.AgentID],
+		})
+	}
+	_, _ = m.coord.MarkAgentResultsReported(runID, reports, now)
+
+	return []llm.Message{{Role: "system", Content: content}}
+}
+
+type autoFollowupEmailReply struct {
+	To      string
+	Subject string
+	Thread  gateway.EmailThreadContext
+}
+
+func (m *tuiModel) loadAutoFollowupEmailReply(runID string) (autoFollowupEmailReply, bool) {
+	if m == nil || m.coord == nil || m.emailGateway == nil {
+		return autoFollowupEmailReply{}, false
+	}
+	run, err := m.coord.ReadRun(strings.TrimSpace(runID))
+	if err != nil || run.Metadata == nil {
+		return autoFollowupEmailReply{}, false
+	}
+	src, _ := run.Metadata["source"].(string)
+	if strings.TrimSpace(src) != "email" {
+		return autoFollowupEmailReply{}, false
+	}
+	emailMeta, ok := run.Metadata["email"].(map[string]any)
+	if !ok || emailMeta == nil {
+		return autoFollowupEmailReply{}, false
+	}
+	to, _ := emailMeta["reply_to"].(string)
+	to = strings.TrimSpace(to)
+	if to == "" {
+		return autoFollowupEmailReply{}, false
+	}
+	subject, _ := emailMeta["reply_subject"].(string)
+	subject = strings.TrimSpace(subject)
+	if subject == "" {
+		if s, ok := run.Metadata["subject"].(string); ok {
+			subject = strings.TrimSpace(s)
+		}
+	}
+	if subject == "" {
+		subject = "(无主题)"
+	}
+
+	var thread gateway.EmailThreadContext
+	if t, ok := emailMeta["thread"].(map[string]any); ok && t != nil {
+		thread.MessageID, _ = t["message_id"].(string)
+		thread.InReplyTo, _ = t["in_reply_to"].(string)
+		thread.References = anyStringSlice(t["references"])
+	}
+
+	return autoFollowupEmailReply{
+		To:      to,
+		Subject: subject,
+		Thread:  thread,
+	}, true
+}
+
+func anyStringSlice(v any) []string {
+	switch t := v.(type) {
+	case []string:
+		out := make([]string, 0, len(t))
+		for _, s := range t {
+			if v := strings.TrimSpace(s); v != "" {
+				out = append(out, v)
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			if v := strings.TrimSpace(s); v != "" {
+				out = append(out, v)
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	case string:
+		text := strings.TrimSpace(t)
+		if text == "" {
+			return nil
+		}
+		return strings.Fields(text)
+	default:
+		return nil
+	}
+}
+
+func (m *tuiModel) runAutoFollowup(runID string, baseHistory []llm.Message, emailReply *autoFollowupEmailReply) {
 	events := m.events
 	agentRef := m.agent
 	ctx := m.ctx
+	gw := m.emailGateway
 
 	defer func() {
 		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{Busy: false}}
 	}()
 
+	var finalText string
 	emit := func(msg llm.Message) {
 		events <- tuiAsyncMsg{Event: tuiAppendHistoryMsg{
 			RunID: runID,
 			Msg:   msg,
 		}}
+		if strings.EqualFold(strings.TrimSpace(msg.Role), "assistant") && len(msg.ToolCalls) == 0 {
+			if t := strings.TrimSpace(msg.Content); t != "" {
+				finalText = t
+			}
+		}
 	}
 
 	userText := "Using the latest [System Message] about subagent completion and the full session context: synthesize a concise user-facing update (what happened, what changed, files touched, commands to run if any, and next steps). If anything is ambiguous, ask the minimal clarifying questions."
-	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit); err != nil {
+	if style := strings.TrimSpace(agentRef.ReplyStyle); style != "" {
+		userText += "\n\nReply style requirements (must follow):\n" + style
+	}
+	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit, nil); err != nil {
+		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
+	}
+
+	if emailReply == nil || gw == nil {
+		return
+	}
+	if strings.TrimSpace(finalText) == "" {
+		finalText = "(no output)"
+	}
+	replyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := gw.SendReply(replyCtx, emailReply.To, emailReply.Subject, finalText, emailReply.Thread); err != nil {
 		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
 	}
 }
@@ -1521,7 +1806,10 @@ func (m *tuiModel) runTurn(runID string, userText string, baseHistory []llm.Mess
 		}}
 	}
 
-	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit); err != nil {
+	afterTool := func(call llm.ToolCall, result string, callErr error) []llm.Message {
+		return m.maybeBuildWaitCompletionSystemMessages(runID, call, result, callErr)
+	}
+	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit, afterTool); err != nil {
 		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
 	}
 }
@@ -1607,7 +1895,7 @@ func fallbackSessionTitle(userText string) string {
 	return text
 }
 
-func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText string, baseHistory []llm.Message, emit func(llm.Message)) error {
+func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText string, baseHistory []llm.Message, emit func(llm.Message), afterTool func(call llm.ToolCall, result string, callErr error) []llm.Message) error {
 	if a == nil || a.Client == nil {
 		return errors.New("agent is not configured")
 	}
@@ -1694,6 +1982,17 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 			emit(toolMsg)
 			turnHistory = append(turnHistory, toolMsg)
 			reqMessages = append(reqMessages, toolMsg)
+
+			if afterTool != nil {
+				for _, extra := range afterTool(call, result, callErr) {
+					if strings.TrimSpace(extra.Role) == "" {
+						continue
+					}
+					emit(extra)
+					turnHistory = append(turnHistory, extra)
+					reqMessages = append(reqMessages, extra)
+				}
+			}
 
 			if a.shouldTriggerAutoMCPReloadAfterToolCall(call, callErr) {
 				needsAutoMCPReload = true
