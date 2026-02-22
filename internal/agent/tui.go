@@ -21,8 +21,10 @@ import (
 	"github.com/mattn/go-runewidth"
 	"golang.org/x/term"
 
+	"test_skill_agent/internal/appinfo"
 	"test_skill_agent/internal/llm"
 	"test_skill_agent/internal/multiagent"
+	"test_skill_agent/internal/restart"
 )
 
 const (
@@ -103,6 +105,7 @@ type tuiModel struct {
 	loading            bool
 	busy               bool
 	notice             string
+	banner             string
 	deleteConfirmRunID string
 	deleteConfirmAt    time.Time
 	fatal              error
@@ -170,6 +173,11 @@ func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator) t
 	vp := viewport.New(0, 0)
 	vp.SetContent("")
 
+	banner := ""
+	if a != nil {
+		banner = strings.TrimSpace(a.StartupBanner)
+	}
+
 	return tuiModel{
 		ctx:           ctx,
 		agent:         a,
@@ -182,6 +190,7 @@ func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator) t
 		cursorLine:    -1,
 		stickToBottom: true,
 		showDone:      false,
+		banner:        banner,
 	}
 }
 
@@ -226,6 +235,10 @@ func tuiDeleteSessionCmd(coord *multiagent.Coordinator, runID string) tea.Cmd {
 }
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.agent != nil && m.agent.RestartManager != nil && m.agent.RestartManager.IsRestartRequested() {
+		return m, tea.Quit
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -273,6 +286,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rerender()
 		return m, nil
 	case tuiRefreshMsg:
+		if m.agent != nil && m.agent.RestartManager != nil && m.agent.RestartManager.IsRestartRequested() {
+			return m, tea.Quit
+		}
 		if m.currentRunID() == "" {
 			return m, tuiTickCmd()
 		}
@@ -993,6 +1009,17 @@ func (m *tuiModel) submitInput() tea.Cmd {
 	switch text {
 	case "/exit", "/quit":
 		return tea.Quit
+	case "/restart":
+		if m.agent != nil && m.agent.RestartManager != nil {
+			_, _, _ = m.agent.RestartManager.RequestRestart(restart.SentinelEntry{
+				App:     appinfo.Name,
+				Version: appinfo.Version,
+				Reason:  "user",
+				Note:    "relaunch requested",
+				RunID:   strings.TrimSpace(runID),
+			})
+		}
+		return tea.Quit
 	case "/mcp reload", "/mcp-reload":
 		m.busy = true
 		m.notice = ""
@@ -1254,6 +1281,9 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 
 			if a.shouldTriggerAutoMCPReloadAfterToolCall(call, callErr) {
 				needsAutoMCPReload = true
+			}
+			if a.RestartManager != nil && a.RestartManager.IsRestartRequested() {
+				return nil
 			}
 
 			if call.Function.Name == "skill_create" || call.Function.Name == "skill_install" {
@@ -1961,7 +1991,7 @@ func (m *tuiModel) renderCenter(width int, height int) string {
 	}
 
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	headerText := "Chat"
+	headerText := appinfo.Display()
 	if m.busy && strings.TrimSpace(m.spinner()) != "" {
 		headerText += " " + m.spinner()
 	}
@@ -1972,12 +2002,18 @@ func (m *tuiModel) renderCenter(width int, height int) string {
 		sessionID = "-"
 	}
 	subHeader := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(fmt.Sprintf("Session: %s | Agent: %s", sessionID, m.currentAgentID()))
-	notice := ""
+	infoLine := ""
 	if strings.TrimSpace(m.notice) != "" {
-		notice = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(truncateANSI("Error: "+m.notice, max(10, width-2)))
+		infoLine = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(
+			truncateANSI("Error: "+strings.TrimSpace(m.notice), max(10, width-2)),
+		)
+	} else if strings.TrimSpace(m.banner) != "" {
+		infoLine = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(
+			truncateANSI(strings.TrimSpace(m.banner), max(10, width-2)),
+		)
 	}
 
-	headerBlock := lipgloss.NewStyle().Padding(0, 1).Render(strings.Join([]string{header, subHeader, notice}, "\n"))
+	headerBlock := lipgloss.NewStyle().Padding(0, 1).Render(strings.Join([]string{header, subHeader, infoLine}, "\n"))
 
 	vp := m.viewport.View()
 	inputLine := m.renderInputLine(width)

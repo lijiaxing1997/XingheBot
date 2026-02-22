@@ -340,12 +340,12 @@ Add your MCP server configuration to `mcp.json`:
 
 1. **If Go code changed, rebuild agent binary once:**
 ```bash
-go build -o ./bin/agent ./cmd/agent
+go build -o ./bin/XingheBot ./cmd/agent
 ```
 
 2. **Start the agent with MCP support:**
 ```bash
-./bin/agent chat
+./bin/XingheBot chat
 ```
 
 3. **Load or refresh MCPs without restarting Agent:**

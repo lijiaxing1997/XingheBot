@@ -14,3 +14,5 @@ venv/
 # Multi-agent run artifacts
 .multi_agent/runs/
 .multi_agent/archive/
+.multi_agent/restart-sentinel.json
+.multi_agent/.restart-sentinel-*.json

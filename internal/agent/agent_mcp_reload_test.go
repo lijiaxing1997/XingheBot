@@ -53,7 +53,7 @@ func TestIsMCPRelatedPath(t *testing.T) {
 	falseCases := []string{
 		"README.md",
 		"skills/mcp-builder/SKILL.md",
-		"bin/agent",
+		"bin/XingheBot",
 		"internal/agent/agent.go",
 	}
 	for _, tc := range falseCases {

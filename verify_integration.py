@@ -258,7 +258,7 @@ def main():
         print("\n下一步:")
         print("1. 安装依赖: pip install -r mcp/calculator/requirements.txt")
         print("2. 测试服务器: cd mcp/calculator && python test_calculator.py")
-        print("3. 启动代理: ./bin/agent chat")
+        print("3. 启动代理: ./bin/XingheBot chat")
         print("4. 测试工具: 询问 'What calculator tools are available?'")
     else:
         print("❌ 存在配置问题，请检查上述错误")

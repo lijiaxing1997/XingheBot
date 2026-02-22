@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"test_skill_agent/internal/appinfo"
 	"test_skill_agent/internal/llm"
+	"test_skill_agent/internal/restart"
 	"test_skill_agent/internal/skills"
 	"test_skill_agent/internal/tools"
 )
@@ -25,6 +27,9 @@ type Agent struct {
 	SystemPrompt string
 	PromptMode   PromptMode
 	ChatToolMode ChatToolMode
+
+	RestartManager *restart.Manager
+	StartupBanner  string
 }
 
 type PromptMode string
@@ -112,6 +117,7 @@ func (a *Agent) buildSystemPrompt() string {
 	b.WriteString("When calling write_file/edit_file: arguments MUST be valid JSON. For large files, write in multiple calls with append=true after the first chunk and keep each call small (aim: args <= 6000 bytes) to avoid truncation.\n")
 	b.WriteString("When MCP config/server setup changes at runtime, use mcp_reload to refresh MCP tools without restarting the agent.\n")
 	b.WriteString("If the user asks to refresh/reload MCP in natural language, execute mcp_reload automatically.\n")
+	b.WriteString("If you need to relaunch the app after changes, you can use /restart or call agent_restart.\n")
 	b.WriteString("\n")
 	b.WriteString("## Skills (mandatory)\n")
 	b.WriteString("Before replying: scan <available_skills> <description> entries.\n")
@@ -197,6 +203,27 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 		if text == "/exit" || text == "/quit" {
 			return nil
 		}
+		if text == "/version" {
+			fmt.Fprintln(out, appinfo.Display())
+			continue
+		}
+		if text == "/restart" {
+			if a.RestartManager == nil {
+				fmt.Fprintln(out, "Restart is not configured.")
+				return nil
+			}
+			_, _, err := a.RestartManager.RequestRestart(restart.SentinelEntry{
+				App:     appinfo.Name,
+				Version: appinfo.Version,
+				Reason:  "user",
+				Note:    "relaunch requested",
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(out, "Restart requested. Relaunching…")
+			return nil
+		}
 		if text == "/mcp reload" || text == "/mcp-reload" {
 			msg, err := a.reloadMCP(ctx)
 			if err != nil {
@@ -272,6 +299,9 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 				reqMessages = append(reqMessages, toolMsg)
 				if a.shouldTriggerAutoMCPReloadAfterToolCall(call, err) {
 					needsAutoMCPReload = true
+				}
+				if a.RestartManager != nil && a.RestartManager.IsRestartRequested() {
+					return nil
 				}
 
 				if call.Function.Name == "skill_create" || call.Function.Name == "skill_install" {

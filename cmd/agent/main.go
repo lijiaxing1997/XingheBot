@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"test_skill_agent/internal/agent"
+	"test_skill_agent/internal/appinfo"
 	"test_skill_agent/internal/llm"
 	"test_skill_agent/internal/mcpclient"
 	"test_skill_agent/internal/multiagent"
+	"test_skill_agent/internal/restart"
 	"test_skill_agent/internal/skills"
 	"test_skill_agent/internal/tools"
 )
@@ -26,6 +28,7 @@ type runtimeOptions struct {
 	MCPConfigPath  string
 	MultiAgentRoot string
 	AutoCleanup    bool
+	AllowRestart   bool
 }
 
 type agentRuntime struct {
@@ -33,6 +36,7 @@ type agentRuntime struct {
 	Registry    *tools.Registry
 	Coordinator *multiagent.Coordinator
 	ReloadMCP   func(context.Context) (string, error)
+	Restart     *restart.Manager
 	closeFn     func() error
 }
 
@@ -98,34 +102,57 @@ func runChat(args []string) error {
 		MCPConfigPath:  *mcpConfigPath,
 		MultiAgentRoot: *multiAgentRoot,
 		AutoCleanup:    true,
+		AllowRestart:   true,
 	})
 	if err != nil {
 		return err
 	}
-	defer func() {
+	closeRuntime := func() {
 		if err := rt.Close(); err != nil {
 			fmt.Fprintln(os.Stderr, "warning:", err)
 		}
-	}()
+	}
 
 	ag, err := agent.New(rt.Client, rt.Registry, resolvedSkillsDir)
 	if err != nil {
+		closeRuntime()
 		return err
 	}
 	ag.SetPromptMode(agent.PromptModeChat)
 	ag.SetChatToolMode(agent.ChatToolMode(*chatToolMode))
 	ag.Temperature = float32(*temperature)
 	ag.MCPReload = rt.ReloadMCP
+	ag.RestartManager = rt.Restart
+
+	if rt.Restart != nil {
+		if sentinel, _ := rt.Restart.ConsumeSentinel(); sentinel != nil {
+			ag.StartupBanner = restart.FormatSentinelMessage(sentinel)
+		}
+	}
 
 	switch strings.ToLower(strings.TrimSpace(*uiMode)) {
 	case "", "tui":
-		return ag.RunInteractiveTUI(context.Background(), os.Stdin, os.Stdout, agent.TUIOptions{
+		err = ag.RunInteractiveTUI(context.Background(), os.Stdin, os.Stdout, agent.TUIOptions{
 			Coordinator: rt.Coordinator,
 		})
 	default:
-		fmt.Println("Agent ready. Type /mcp reload to refresh MCP servers, or /exit to quit.")
-		return ag.RunInteractive(context.Background(), os.Stdin, os.Stdout)
+		fmt.Printf("%s ready. Type /mcp reload to refresh MCP servers, /restart to relaunch, or /exit to quit.\n", appinfo.Display())
+		err = ag.RunInteractive(context.Background(), os.Stdin, os.Stdout)
 	}
+
+	if err != nil {
+		closeRuntime()
+		return err
+	}
+	if rt.Restart != nil && rt.Restart.IsRestartRequested() {
+		if _, spawnErr := restart.SpawnReplacement("", os.Args[1:]); spawnErr != nil {
+			closeRuntime()
+			return spawnErr
+		}
+		os.Exit(0)
+	}
+	closeRuntime()
+	return nil
 }
 
 func runWorker(args []string) error {
@@ -171,6 +198,7 @@ func runWorker(args []string) error {
 		MCPConfigPath:  *mcpConfigPath,
 		MultiAgentRoot: *multiAgentRoot,
 		AutoCleanup:    false,
+		AllowRestart:   false,
 	})
 	if err != nil {
 		_ = ctl.Finish("", err)
@@ -309,6 +337,7 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	}
 
 	coord := multiagent.NewCoordinator(opts.MultiAgentRoot)
+	restartManager := restart.NewManager(restart.ResolveSentinelPath(opts.MultiAgentRoot))
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	cleanupDone := (<-chan struct{})(nil)
 	if opts.AutoCleanup {
@@ -367,12 +396,16 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	registry.Register(&tools.SubagentsTool{Coordinator: coord})
 	registry.Register(&tools.AgentSignalSendTool{Coordinator: coord})
 	registry.Register(&tools.AgentSignalWaitTool{Coordinator: coord})
+	if opts.AllowRestart {
+		registry.Register(&tools.AgentRestartTool{Manager: restartManager})
+	}
 
 	return &agentRuntime{
 		Client:      client,
 		Registry:    registry,
 		Coordinator: coord,
 		ReloadMCP:   reloadMCP,
+		Restart:     restartManager,
 		closeFn: func() error {
 			cleanupCancel()
 			if cleanupDone != nil {
