@@ -88,6 +88,17 @@ type Config struct {
 	BaseURL      string `json:"base_url"`
 	Model        string `json:"model"`
 	MaxTokens    int    `json:"max_tokens"`
+	Assistant    AssistantConfig `json:"assistant"`
+}
+
+type AssistantConfig struct {
+	ReplyStyle ReplyStyleConfig `json:"reply_style"`
+}
+
+type ReplyStyleConfig struct {
+	Enabled *bool  `json:"enabled"`
+	MDPath  string `json:"md_path"`
+	Text    string `json:"text"`
 }
 
 func NewClientFromEnv() (*Client, error) {

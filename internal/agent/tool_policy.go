@@ -46,7 +46,7 @@ func (p turnToolPolicy) toolVisible(name string) bool {
 	}
 
 	if p.ChatToolMode == ChatToolModeDispatcher {
-		return strings.HasPrefix(tool, "agent_") || strings.HasPrefix(tool, "skill_") || tool == "mcp_reload" || tool == "subagents"
+		return strings.HasPrefix(tool, "agent_") || tool == "subagents"
 	}
 
 	return true
@@ -70,7 +70,7 @@ func (p *turnToolPolicy) allowTool(toolName string) error {
 
 	// Dispatcher policy: primary agent should only operate the control-plane.
 	if p.ChatToolMode == ChatToolModeDispatcher {
-		if strings.HasPrefix(name, "agent_") || strings.HasPrefix(name, "skill_") || name == "mcp_reload" || name == "subagents" {
+		if strings.HasPrefix(name, "agent_") || name == "subagents" {
 			if !p.AllowBlockingWait && isProgressTool(name) {
 				const maxProgressCalls = 3
 				if p.progressCalls >= maxProgressCalls {

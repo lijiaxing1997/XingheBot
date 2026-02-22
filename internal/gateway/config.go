@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,10 +10,6 @@ import (
 	"strings"
 	"time"
 )
-
-type RootConfig struct {
-	Gateway GatewayConfig `json:"网关配置"`
-}
 
 type GatewayConfig struct {
 	Enabled bool        `json:"enabled"`
@@ -50,12 +47,25 @@ func LoadGatewayConfig(path string) (GatewayConfig, error) {
 	if err != nil {
 		return GatewayConfig{}, err
 	}
-	var root RootConfig
+
+	var root map[string]json.RawMessage
 	if err := json.Unmarshal(data, &root); err != nil {
 		return GatewayConfig{}, fmt.Errorf("parse config.json: %w", err)
 	}
-	root.Gateway.Email.applyDefaults()
-	return root.Gateway, nil
+
+	var cfg GatewayConfig
+	if raw, ok := root["gateway"]; ok && len(bytes.TrimSpace(raw)) > 0 {
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return GatewayConfig{}, fmt.Errorf("parse config.json.gateway: %w", err)
+		}
+	} else if raw, ok := root["网关配置"]; ok && len(bytes.TrimSpace(raw)) > 0 {
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return GatewayConfig{}, fmt.Errorf("parse config.json.网关配置: %w", err)
+		}
+	}
+
+	cfg.Email.applyDefaults()
+	return cfg, nil
 }
 
 func (c *EmailConfig) applyDefaults() {

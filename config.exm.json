@@ -4,7 +4,13 @@
   "base_url": "https://api.deepseek.com",
   "model": "deepseek-chat",
   "max_tokens": 0,
-  "网关配置": {
+  "assistant": {
+    "reply_style": {
+      "enabled": true,
+      "md_path": "reply_style.md"
+    }
+  },
+  "gateway": {
     "enabled": false,
     "email": {
       "provider": "126",

@@ -8,7 +8,7 @@
 - 子 Agent 独立进程并行执行。
 - 进程间通过 JSON 文件通信（state/commands/events/signals/result）。
 - 支持阻塞等待、暂停/恢复、取消等控制。
-- 子 Agent 与主 Agent 一样，拥有完整工具权限（文件/exec/skill/MCP/多 Agent 工具）。
+- 子 Agent 拥有完整工具权限（文件/exec/skill/MCP/多 Agent 工具）；主 Agent 默认仅做任务拆解与编排（控制面工具：`agent_*` / `subagents`）。
 
 ## 2. 目录结构
 
@@ -73,11 +73,19 @@ worker 在结束时会自动向 run-level signals 发布 `agent_finished`（payl
 - 交互模式：`agent chat ...`
 - 子 Agent worker 进程：`agent worker --run-root ... --run-id ... --agent-id ...`
 
-`agent chat` 默认是 dispatcher 模式：主 Agent 只允许调用 `agent_*` / `subagents` / `skill_*` / `mcp_reload`，避免主 Agent“直接干活”。如需允许主 Agent 直接使用文件/exec 工具，可用：`agent chat --chat-tool-mode full`。
+`agent chat` 默认是 dispatcher 模式：主 Agent 只允许调用 `agent_*` / `subagents`，避免主 Agent“直接干活”。如需允许主 Agent 直接使用文件/exec 等工具，可用：`agent chat --chat-tool-mode full`（不推荐，除非你明确要把主 Agent 当单体 Agent 用）。
 
 `agent_spawn` 会自动拉起 `agent worker`，通常不需要手动执行。
 
-## 6. 清理/归档建议
+## 6. 主 Agent 回复风格 / 人设（可选）
+
+主 Agent 的对话语气可通过 `config.json` 配置并从 Markdown 文件加载：
+
+- `assistant.reply_style.enabled`: 是否启用（默认：当 `text/md_path` 任一存在时自动启用）。
+- `assistant.reply_style.md_path`: Markdown 文件路径（相对路径按 `config.json` 所在目录解析），示例：`reply_style.md`。
+- `assistant.reply_style.text`: 直接内联文本（优先级高于 `md_path`）。
+
+## 7. 清理/归档建议
 
 `.multi_agent/runs` 会随着运行次数增多而变大/变乱，通常不需要长期保留所有 run。
 
@@ -95,7 +103,7 @@ worker 在结束时会自动向 run-level signals 发布 `agent_finished`（payl
 3) 直接删除（谨慎）：
    - `agent_run_prune` with `{ "mode": "delete", "keep_last": 20, "older_than_days": 7, "dry_run": false }`
 
-## 7. 自动定期清理（类似 OpenClaw 的 archiveAfterMinutes）
+## 8. 自动定期清理（类似 OpenClaw 的 archiveAfterMinutes）
 
 `agent chat` 会在后台启动一个清理 sweeper，按配置定期把**已结束**的 run 从 `.multi_agent/runs` 归档到 `.multi_agent/archive`（默认 **archive**，不会直接删除）。
 
@@ -132,7 +140,7 @@ worker 在结束时会自动向 run-level signals 发布 `agent_finished`（payl
 { "multi_agent": { "cleanup": { "enabled": false } } }
 ```
 
-## 8. TUI 子 Agent 太多（隐藏但保留）
+## 9. TUI 子 Agent 太多（隐藏但保留）
 
 TUI 右侧 `Status` / `TAB` 只影响“显示”，不必删除子 Agent 文件。
 

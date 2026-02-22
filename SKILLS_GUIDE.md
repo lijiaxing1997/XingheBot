@@ -49,8 +49,9 @@ skills/<skill-name>/
 
 ## 4) 触发与加载（运行时行为）
 
-- system prompt 会包含 `<available_skills> ... </available_skills>` 列表（name/description/location）。
-- 模型应先扫描 `<description>` 判断是否需要 skill：
+- **子 Agent（worker）** 的 system prompt 会包含 `<available_skills> ... </available_skills>` 列表（name/description/location）。
+- **主 Agent（chat/dispatcher）** 不再包含 skills 列表；主 Agent 负责拆解与编排，把“是否需要加载哪个 skill”交给子 Agent 决定。
+- 子 Agent 应先扫描 `<description>` 判断是否需要 skill：
   - 若只有一个 skill 明显匹配：用 `skill_load(name)` 加载其 SKILL.md 并遵循。
   - 若多个可能匹配：选最具体的一个再加载。
   - 若不匹配：不要加载任何 SKILL.md。
@@ -61,4 +62,3 @@ skills/<skill-name>/
 - 创建 skill：`agent skills create --name <name> --description <desc>`
 - 安装 skill（本地）：`agent skills install --local <dir>`
 - 安装 skill（GitHub）：`agent skills install --repo owner/repo --path path/in/repo --ref main`
-

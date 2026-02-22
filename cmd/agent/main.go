@@ -29,6 +29,7 @@ type runtimeOptions struct {
 	MultiAgentRoot string
 	AutoCleanup    bool
 	AllowRestart   bool
+	ControlPlaneOnly bool
 }
 
 type agentRuntime struct {
@@ -85,7 +86,7 @@ func runChat(args []string) error {
 	skillsDir := fs.String("skills-dir", defaultSkillsDir(), "skills directory")
 	temperature := fs.Float64("temperature", 0.2, "LLM temperature")
 	maxTokens := fs.Int("max-tokens", 0, "max tokens for completion (overrides config)")
-	chatToolMode := fs.String("chat-tool-mode", "dispatcher", "chat tool access: dispatcher (agent_* only) or full")
+	chatToolMode := fs.String("chat-tool-mode", "dispatcher", "chat tool access: dispatcher (agent_* + subagents only) or full")
 	uiMode := fs.String("ui", "tui", "ui mode: tui (default) or plain")
 	configPath := fs.String("config", "config.json", "path to config.json")
 	mcpConfigPath := fs.String("mcp-config", "mcp.json", "path to MCP config")
@@ -93,6 +94,10 @@ func runChat(args []string) error {
 	fs.Parse(args)
 
 	resolvedSkillsDir := resolvePath(*skillsDir)
+	controlPlaneOnly := true
+	if strings.EqualFold(strings.TrimSpace(*chatToolMode), string(agent.ChatToolModeFull)) {
+		controlPlaneOnly = false
+	}
 
 	rt, err := newAgentRuntime(runtimeOptions{
 		SkillsDir:      resolvedSkillsDir,
@@ -103,6 +108,7 @@ func runChat(args []string) error {
 		MultiAgentRoot: *multiAgentRoot,
 		AutoCleanup:    true,
 		AllowRestart:   true,
+		ControlPlaneOnly: controlPlaneOnly,
 	})
 	if err != nil {
 		return err
@@ -124,6 +130,12 @@ func runChat(args []string) error {
 	ag.MCPReload = rt.ReloadMCP
 	ag.RestartManager = rt.Restart
 
+	if replyStyle, err := loadReplyStyleFromConfig(*configPath); err != nil {
+		fmt.Fprintln(os.Stderr, "warning:", err)
+	} else if strings.TrimSpace(replyStyle) != "" {
+		ag.SetReplyStyle(replyStyle)
+	}
+
 	if rt.Restart != nil {
 		if sentinel, _ := rt.Restart.ConsumeSentinel(); sentinel != nil {
 			ag.StartupBanner = restart.FormatSentinelMessage(sentinel)
@@ -137,7 +149,11 @@ func runChat(args []string) error {
 			ConfigPath:  *configPath,
 		})
 	default:
-		fmt.Printf("%s ready. Type /mcp reload to refresh MCP servers, /restart to relaunch, or /exit to quit.\n", appinfo.Display())
+		if controlPlaneOnly {
+			fmt.Printf("%s ready. Type /restart to relaunch, or /exit to quit.\n", appinfo.Display())
+		} else {
+			fmt.Printf("%s ready. Type /mcp reload to refresh MCP servers, /restart to relaunch, or /exit to quit.\n", appinfo.Display())
+		}
 		err = ag.RunInteractive(context.Background(), os.Stdin, os.Stdout)
 	}
 
@@ -200,6 +216,7 @@ func runWorker(args []string) error {
 		MultiAgentRoot: *multiAgentRoot,
 		AutoCleanup:    false,
 		AllowRestart:   false,
+		ControlPlaneOnly: false,
 	})
 	if err != nil {
 		_ = ctl.Finish("", err)
@@ -301,40 +318,46 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	}
 
 	registry := tools.NewRegistry()
-	registerCoreTools(registry, opts.SkillsDir, opts.ConfigPath)
+	var (
+		reloadMCP  func(context.Context) (string, error)
+		mcpRuntime *mcpclient.Runtime
+	)
+	if !opts.ControlPlaneOnly {
+		registerCoreTools(registry, opts.SkillsDir, opts.ConfigPath)
 
-	cfgPath := strings.TrimSpace(opts.MCPConfigPath)
-	if cfgPath == "" {
-		cfgPath = "mcp.json"
-	}
-	mcpRuntime := mcpclient.NewRuntime(cfgPath)
-	registeredMCPToolNames := make([]string, 0)
+		cfgPath := strings.TrimSpace(opts.MCPConfigPath)
+		if cfgPath == "" {
+			cfgPath = "mcp.json"
+		}
+		mcpRuntime = mcpclient.NewRuntime(cfgPath)
+		registeredMCPToolNames := make([]string, 0)
 
-	reloadMCPInternal := func(ctx context.Context) (mcpclient.ReloadReport, error) {
-		report, err := mcpRuntime.Reload(ctx)
-		if err != nil {
-			return report, err
+		reloadMCPInternal := func(ctx context.Context) (mcpclient.ReloadReport, error) {
+			report, err := mcpRuntime.Reload(ctx)
+			if err != nil {
+				return report, err
+			}
+			registry.UnregisterMany(registeredMCPToolNames)
+			for _, tool := range mcpRuntime.Tools() {
+				registry.Register(tool)
+			}
+			registeredMCPToolNames = mcpRuntime.ToolNames()
+			return report, nil
 		}
-		registry.UnregisterMany(registeredMCPToolNames)
-		for _, tool := range mcpRuntime.Tools() {
-			registry.Register(tool)
+		reloadMCP = func(ctx context.Context) (string, error) {
+			report, err := reloadMCPInternal(ctx)
+			if err != nil {
+				return "", err
+			}
+			return report.String(), nil
 		}
-		registeredMCPToolNames = mcpRuntime.ToolNames()
-		return report, nil
-	}
-	reloadMCP := func(ctx context.Context) (string, error) {
-		report, err := reloadMCPInternal(ctx)
-		if err != nil {
-			return "", err
-		}
-		return report.String(), nil
-	}
 
-	registry.Register(&tools.MCPReloadTool{Reload: reloadMCP})
-	if report, err := reloadMCPInternal(context.Background()); err != nil {
-		fmt.Fprintln(os.Stderr, "warning:", err)
-	} else if len(report.Warnings) > 0 {
-		fmt.Fprintln(os.Stderr, "warning:", report.String())
+		registry.Register(&tools.MCPReloadTool{Reload: reloadMCP})
+		if report, err := reloadMCPInternal(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, "warning:", err)
+		} else if len(report.Warnings) > 0 {
+			fmt.Fprintln(os.Stderr, "warning:", report.String())
+		}
 	}
 
 	coord := multiagent.NewCoordinator(opts.MultiAgentRoot)
@@ -415,7 +438,10 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 				case <-time.After(2 * time.Second):
 				}
 			}
-			return mcpRuntime.Close()
+			if mcpRuntime != nil {
+				return mcpRuntime.Close()
+			}
+			return nil
 		},
 	}, nil
 }
@@ -542,6 +568,47 @@ func resolvePath(raw string) string {
 		return filepath.Clean(trimmed)
 	}
 	return filepath.Clean(abs)
+}
+
+func loadReplyStyleFromConfig(configPath string) (string, error) {
+	cfg, err := llm.LoadConfig(configPath)
+	if err != nil {
+		return "", err
+	}
+
+	replyStyle := cfg.Assistant.ReplyStyle
+	enabled := false
+	if replyStyle.Enabled != nil {
+		enabled = *replyStyle.Enabled
+	} else {
+		enabled = strings.TrimSpace(replyStyle.Text) != "" || strings.TrimSpace(replyStyle.MDPath) != ""
+	}
+	if !enabled {
+		return "", nil
+	}
+
+	if text := strings.TrimSpace(replyStyle.Text); text != "" {
+		return text, nil
+	}
+
+	mdPath := strings.TrimSpace(replyStyle.MDPath)
+	if mdPath == "" {
+		return "", nil
+	}
+
+	configAbs := resolvePath(configPath)
+	configDir := ""
+	if configAbs != "" {
+		configDir = filepath.Dir(configAbs)
+	}
+	if !filepath.IsAbs(mdPath) && configDir != "" {
+		mdPath = filepath.Join(configDir, mdPath)
+	}
+	data, err := os.ReadFile(mdPath)
+	if err != nil {
+		return "", fmt.Errorf("load reply style md (%s): %w", mdPath, err)
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 func findGitRoot(startDir string) string {

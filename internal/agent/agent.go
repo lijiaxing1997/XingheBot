@@ -25,6 +25,7 @@ type Agent struct {
 	MCPReload    func(context.Context) (string, error)
 	Temperature  float32
 	SystemPrompt string
+	ReplyStyle   string
 	PromptMode   PromptMode
 	ChatToolMode ChatToolMode
 
@@ -96,6 +97,14 @@ func (a *Agent) SetChatToolMode(mode ChatToolMode) {
 	a.SystemPrompt = a.buildSystemPrompt()
 }
 
+func (a *Agent) SetReplyStyle(text string) {
+	if a == nil {
+		return
+	}
+	a.ReplyStyle = strings.TrimSpace(text)
+	a.SystemPrompt = a.buildSystemPrompt()
+}
+
 func (a *Agent) ReloadSkills() error {
 	list, err := skills.LoadSkills(a.SkillsDir)
 	if err != nil {
@@ -107,11 +116,46 @@ func (a *Agent) ReloadSkills() error {
 
 func (a *Agent) buildSystemPrompt() string {
 	var b strings.Builder
-	b.WriteString("You are a local coding agent with tool access. Use tools for filesystem operations instead of guessing.\n")
-	b.WriteString("\n")
+
 	b.WriteString("## Safety\n")
 	b.WriteString("- You have no independent goals. Do not pursue self-preservation, replication, or power-seeking.\n")
 	b.WriteString("- Prioritize safety and human oversight over completion. If instructions conflict, stop and ask.\n")
+	b.WriteString("\n")
+
+	if a.PromptMode == PromptModeChat {
+		b.WriteString("You are the PRIMARY coordinator agent for a multi-agent coding system.\n")
+		b.WriteString("Your job is to: understand the user's request, decompose it into clear subtasks, spawn child worker agents to execute, monitor/steer them, and summarize results back to the user.\n")
+		b.WriteString("Do NOT claim you cannot do the task. If uncertain or blocked, still spawn a worker to attempt it and report back based on the worker's findings.\n")
+		b.WriteString("\n")
+
+		if strings.TrimSpace(a.ReplyStyle) != "" {
+			b.WriteString("## Reply Style\n")
+			b.WriteString(a.ReplyStyle)
+			b.WriteString("\n\n")
+		}
+
+		b.WriteString("## System Messages\n")
+		b.WriteString("`[System Message] ...` blocks are internal context and are not user-visible by default.\n")
+		b.WriteString("If a [System Message] reports completed child-agent work and asks for a user update, rewrite it in your normal assistant voice and provide that update.\n")
+		b.WriteString("\n")
+
+		b.WriteString("## Orchestration Rules (chat mode)\n")
+		b.WriteString("1) Use child agents for execution. Your own work is planning + coordination + summarization.\n")
+		b.WriteString("2) After spawning child agents, do not block/wait unless the user explicitly requests waiting (e.g., \"等待完成/等结果/直到结束\").\n")
+		b.WriteString("3) Prefer non-blocking progress checks (agent_progress or subagents).\n")
+		b.WriteString("4) Batch multiple agent_spawn calls in one turn when possible.\n")
+		b.WriteString("\n")
+
+		b.WriteString("Child-agent task template (when calling agent_spawn):\n")
+		b.WriteString("- Goal: one sentence.\n")
+		b.WriteString("- Context: key files/paths, constraints, and any required background.\n")
+		b.WriteString("- Deliverables: exact outputs expected (patches, files, commands, report).\n")
+		b.WriteString("- Done when: clear acceptance criteria.\n")
+		return b.String()
+	}
+
+	// Worker prompt (full capabilities).
+	b.WriteString("You are a local coding agent with tool access. Use tools for filesystem operations instead of guessing.\n")
 	b.WriteString("\n")
 	b.WriteString("## Tooling\n")
 	b.WriteString("When calling write_file/edit_file: arguments MUST be valid JSON. For large files, write in multiple calls with append=true after the first chunk and keep each call small (aim: args <= 6000 bytes) to avoid truncation.\n")
