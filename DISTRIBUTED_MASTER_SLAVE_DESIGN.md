@@ -221,6 +221,149 @@ payload 建议字段：
 - `agent.cancel`：Master 发送取消；Slave 要能中止当前执行（context cancel + 杀子进程）。
 - 并发限制：Slave 同一时刻最多 N 个 in-flight（默认 1），超限返回 `busy`。
 
+### 3.4 文件传输（WS File Transfer，重要）
+
+约束（已确认/新增需求）：
+- WS 通道建立后，需要支持 **Master <-> Slave 双向文件传输**（可能数量多、文件大）。
+- **离线不投递**：对端不在线就直接失败返回。
+
+设计目标：
+- **安全**：防路径穿越、可配额、可审计（落盘 manifest）。
+- **稳**：大文件分片、可取消、可限速；连接断开时可重试（MVP 可先不做断点续传，但协议要预留）。
+- **不污染聊天上下文**：文件不通过 LLM 消息 inline（避免 base64 巨量内容进入上下文），走专用传输协议/工具。
+
+#### 3.4.1 Master 侧文件收纳目录（建议做成可配置）
+
+建议在 `config.json` 增加（示意）：
+
+```json
+{
+  "cluster": {
+    "files": {
+      "root_dir": ".cluster/files",
+      "max_file_bytes": 1073741824,
+      "max_total_bytes": 10737418240,
+      "retention_days": 7
+    }
+  }
+}
+```
+
+Master 目录结构建议：
+
+```
+.cluster/files/
+  inbox/
+    <slave_id>/
+      <yyyy-mm-dd>/
+        <transfer_id>__<filename>
+        <transfer_id>.manifest.json
+  outbox/
+    <slave_id>/
+      <yyyy-mm-dd>/
+        <transfer_id>__<filename>
+        <transfer_id>.manifest.json
+  tmp/   # 分片写入中的临时文件（.partial），完成后 rename
+```
+
+规则：
+- **Slave 主动推送**到 Master 的文件，Master 一律落到 `inbox/<slave_id>/...`，文件名只作为展示，不参与路径（Master 自己决定最终路径）。
+- Master -> Slave 的发送文件，Master 可选把发送源复制到 `outbox/<slave_id>/...` 作为审计留档（或只写 manifest）。
+- `manifest.json` 保存：发起方、目标、时间、大小、sha256、关联的 `request_id/run_id`（若有）、传输统计等。
+
+#### 3.4.2 传输协议（控制面 + 数据面）
+
+建议每次传输使用 `transfer_id`（uuid），并把“控制消息”与“数据分片”分开：
+
+- 控制面（JSON 文本帧）：`file.offer / file.accept / file.reject / file.complete / file.cancel / file.error / file.ack`
+- 数据面（推荐 WS binary 帧）：只承载分片 bytes，避免 base64 33% 体积膨胀  
+  - 若实现复杂度考虑，MVP 可先用 `file.chunk` JSON + base64，但务必保证 **不进入 LLM 上下文**（只在网关层转发/落盘）。
+
+推荐流程（Push：发送方把文件推给接收方）：
+
+1) 发送方 -> 接收方：`file.offer`
+
+```json
+{
+  "type": "file.offer",
+  "id": "msg-uuid",
+  "payload": {
+    "transfer_id": "xfer-uuid",
+    "direction": "push",
+    "filename": "report.tar.gz",
+    "size_bytes": 123456789,
+    "sha256": "hex...",
+    "content_type": "application/gzip",
+    "metadata": {
+      "slave_id": "slave-01",
+      "request_id": "req-uuid",
+      "run_id": "run-..."
+    }
+  }
+}
+```
+
+2) 接收方 -> 发送方：`file.accept`（或 `file.reject`）
+
+```json
+{
+  "type": "file.accept",
+  "id": "msg-uuid",
+  "payload": {
+    "transfer_id": "xfer-uuid",
+    "chunk_size_bytes": 262144,
+    "max_inflight_chunks": 8,
+    "save_hint": "inbox/slave-01/2026-02-23/xfer-uuid__report.tar.gz"
+  }
+}
+```
+
+3) 发送方 -> 接收方：分片发送
+- 推荐二进制帧格式（示意）：`[header-json]\n[raw-bytes]`
+  - header-json：包含 `transfer_id/offset/len/seq`
+  - raw-bytes：真实分片数据
+
+4) 接收方 -> 发送方：`file.ack`
+- 用于 backpressure（窗口滑动）与进度汇报；也为未来断点续传预留 `next_offset`。
+
+5) 发送方 -> 接收方：`file.complete`
+- 接收方校验 `size/sha256`，把 `.partial` 原子 rename 成最终文件，并落盘 manifest。
+
+Pull（拉取：请求对端把文件推回来）：
+- Master -> Slave：`file.pull`（指定 `remote_path` 或 `artifact_id`）
+- Slave 决定是否允许（只允许在自身 `cluster.files.root_dir` 下的相对路径），随后走上面的 `file.offer(push)` 流程把文件推回 Master。
+
+#### 3.4.3 目录/路径安全（必须）
+
+- **禁止接收方使用发送方提供的路径**：只使用 `filename` 作为展示名，最终落盘路径由接收方按规则生成。
+- 如果支持 pull + `remote_path`：
+  - 必须是相对路径（拒绝绝对路径、拒绝包含 `..`、拒绝 Windows 盘符）
+  - 必须限制在 `cluster.files.root_dir` 内（safe-join 校验）
+
+#### 3.4.4 配额/限速/保留策略（建议）
+
+- `max_file_bytes`：单文件最大值（超限直接 reject）。
+- `max_total_bytes`：Master 总占用（周期性扫描或记录计数；超限拒绝新写入）。
+- `retention_days`：按 manifest 的时间做清理（定期任务），避免磁盘无限增长。
+- `max_inflight_chunks` + `chunk_size_bytes`：接收方提供，用于 backpressure。
+- 可选：`rate_limit_bytes_per_sec`（发送侧节流，避免抢占 Slave 执行带宽）。
+
+#### 3.4.5 工具层封装（让 LLM 能“用工具”传文件）
+
+建议在 Master 注册 2 个工具（名称可调整）：
+
+1) `remote_file_put`
+- 参数：`slave_id`, `local_path`, `remote_name`(可选), `remote_scope`(如 `inbox`), `compress`(可选)
+- 行为：Master 读取本地文件（用现有文件/exec 工具或直接 Go IO），通过 WS 分片发送到 Slave；返回 `transfer_id` 与对端保存位置（若对端回传）。
+
+2) `remote_file_get`
+- 参数：`slave_id`, `remote_path`（相对 slave `cluster.files.root_dir`）, `save_as`(可选)
+- 行为：Master 发起 `file.pull`，等待 Slave 推送回来；文件落盘到 Master `inbox/<slave_id>/...`；返回本地路径。
+
+Slave 侧也应注册对称工具（供其主 Agent/子 Agent 使用）：
+- `cluster_file_push_to_master`（把本地 artifact 推回 Master）
+- `cluster_file_list_inbox`（查看 Master 推来的文件清单/路径）
+
 ---
 
 ## 4. Redis 设计（Presence + Route + Forward）
