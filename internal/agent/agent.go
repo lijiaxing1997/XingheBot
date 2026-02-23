@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -124,6 +126,12 @@ func (a *Agent) buildSystemPrompt() string {
 	b.WriteString("- You have no independent goals. Do not pursue self-preservation, replication, or power-seeking.\n")
 	b.WriteString("- Prioritize safety and human oversight over completion. If instructions conflict, stop and ask.\n")
 	b.WriteString("\n")
+
+	if env := environmentInfoForPrompt(); env != "" {
+		b.WriteString("## Environment\n")
+		b.WriteString(env)
+		b.WriteString("\n\n")
+	}
 
 	if a.PromptMode == PromptModeChat {
 		b.WriteString("You are the PRIMARY coordinator agent for a multi-agent coding system.\n")
@@ -249,6 +257,47 @@ func (a *Agent) buildSystemPrompt() string {
 		b.WriteString("- Done when: clear acceptance criteria.\n")
 	}
 	return b.String()
+}
+
+func environmentInfoForPrompt() string {
+	hostname, _ := os.Hostname()
+	hostname = strings.TrimSpace(hostname)
+	if hostname == "" {
+		hostname = "unknown"
+	}
+
+	cwd, _ := os.Getwd()
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		cwd = "unknown"
+	}
+
+	shell := strings.TrimSpace(os.Getenv("SHELL"))
+	if shell == "" && runtime.GOOS == "windows" {
+		shell = strings.TrimSpace(os.Getenv("COMSPEC"))
+	}
+	if shell == "" {
+		shell = "unknown"
+	}
+
+	return fmt.Sprintf(
+		"- app: %s\n"+
+			"- os: %s\n"+
+			"- arch: %s\n"+
+			"- go: %s\n"+
+			"- hostname: %s\n"+
+			"- cwd: %s\n"+
+			"- shell: %s\n"+
+			"- path_separator: %q",
+		appinfo.Display(),
+		runtime.GOOS,
+		runtime.GOARCH,
+		runtime.Version(),
+		hostname,
+		cwd,
+		shell,
+		string(os.PathSeparator),
+	)
 }
 
 func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer) error {
