@@ -47,6 +47,7 @@ const (
 type TUIOptions struct {
 	Coordinator *multiagent.Coordinator
 	ConfigPath  string
+	SlaveProvider SlaveListProvider
 }
 
 func (a *Agent) RunInteractiveTUI(ctx context.Context, in io.Reader, out io.Writer, opts TUIOptions) error {
@@ -69,7 +70,7 @@ func (a *Agent) RunInteractiveTUI(ctx context.Context, in io.Reader, out io.Writ
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	model := newTUIModel(ctx, a, opts.Coordinator, strings.TrimSpace(opts.ConfigPath))
+	model := newTUIModel(ctx, a, opts.Coordinator, strings.TrimSpace(opts.ConfigPath), opts.SlaveProvider)
 	prog := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),
@@ -84,6 +85,9 @@ type tuiModel struct {
 	ctx   context.Context
 	agent *Agent
 	coord *multiagent.Coordinator
+
+	slaveProvider SlaveListProvider
+	slaves        []SlaveSummary
 
 	events chan tuiAsyncMsg
 
@@ -190,7 +194,7 @@ type tuiGatewayInboundMsg struct {
 	Msg gateway.EmailInbound
 }
 
-func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator, configPath string) tuiModel {
+func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator, configPath string, slaveProvider SlaveListProvider) tuiModel {
 	inp := textinput.New()
 	inp.Placeholder = "Type a message…"
 	inp.Prompt = "› "
@@ -231,6 +235,7 @@ func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator, c
 		ctx:               ctx,
 		agent:             a,
 		coord:             coord,
+		slaveProvider:     slaveProvider,
 		events:            make(chan tuiAsyncMsg, 512),
 		input:             inp,
 		viewport:          vp,
@@ -393,6 +398,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(tuiSpinnerFrames) > 0 {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(tuiSpinnerFrames)
 		}
+		m.refreshSlaves()
 		m.refreshAgentIDs()
 		m.maybeAutoFollowup()
 		m.maybeProcessGatewayInbox()
@@ -1481,7 +1487,7 @@ func (m tuiModel) View() string {
 	leftW, rightW := m.leftRightWidths()
 	midW := max(0, m.width-leftW-rightW)
 
-	left := m.renderSessions(leftW, m.height)
+	left := m.renderLeftPanel(leftW, m.height)
 	center := m.renderCenter(midW, m.height)
 	right := m.renderStatus(rightW, m.height)
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, center, right)
@@ -1629,6 +1635,24 @@ func (m *tuiModel) refreshAgentIDs() {
 			break
 		}
 	}
+}
+
+func (m *tuiModel) refreshSlaves() {
+	if m.slaveProvider == nil {
+		m.slaves = nil
+		return
+	}
+	slaves := m.slaveProvider.SnapshotSlaves()
+	sort.Slice(slaves, func(i, j int) bool {
+		if slaves[i].Status != slaves[j].Status {
+			return slaves[i].Status < slaves[j].Status
+		}
+		if slaves[i].Name != slaves[j].Name {
+			return slaves[i].Name < slaves[j].Name
+		}
+		return slaves[i].SlaveID < slaves[j].SlaveID
+	})
+	m.slaves = slaves
 }
 
 func (m *tuiModel) selectSession(delta int) {
@@ -2700,6 +2724,186 @@ func subagentToolViews(events []multiagent.AgentEvent) []*toolView {
 		}
 	}
 	return out
+}
+
+func splitLeftPanelHeights(total int) (sessionsH int, slavesH int) {
+	const (
+		sessionsMin = 8
+		slavesMin   = 6
+	)
+	if total <= 0 {
+		return 0, 0
+	}
+	if total < sessionsMin+3 {
+		return total, 0
+	}
+	if total < sessionsMin+slavesMin {
+		return sessionsMin, total - sessionsMin
+	}
+	sessionsH = total / 2
+	if sessionsH < sessionsMin {
+		sessionsH = sessionsMin
+	}
+	if sessionsH > total-slavesMin {
+		sessionsH = total - slavesMin
+	}
+	slavesH = total - sessionsH
+	return sessionsH, slavesH
+}
+
+func (m *tuiModel) renderLeftPanel(width int, height int) string {
+	style := lipgloss.NewStyle().Width(width).Height(height).BorderRight(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("8"))
+	sessionsH, slavesH := splitLeftPanelHeights(height)
+	lines := make([]string, 0, height)
+	lines = append(lines, m.renderSessionsLines(width, sessionsH)...)
+	if slavesH > 0 {
+		lines = append(lines, m.renderSlavesLines(width, slavesH)...)
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return style.Render(strings.Join(lines, "\n"))
+}
+
+func (m *tuiModel) renderSessionsLines(width int, height int) []string {
+	if height <= 0 {
+		return nil
+	}
+	var lines []string
+	title := lipgloss.NewStyle().Bold(true).Render("Sessions")
+	lines = append(lines, title)
+	if height == 1 {
+		return lines
+	}
+	lines = append(lines, "")
+
+	cursor := m.sessionCursor
+	if cursor < -1 || cursor >= len(m.sessions) {
+		cursor = m.sessionIndex
+	}
+
+	newPrefix := "  "
+	if cursor == -1 {
+		newPrefix = "> "
+	}
+	newStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	lines = append(lines, truncateANSI(newPrefix+newStyle.Render("+ New session"), width-1))
+	if len(lines) >= height {
+		return lines[:height]
+	}
+	lines = append(lines, "")
+
+	activeStyle := lipgloss.NewStyle().Bold(true)
+	for i, run := range m.sessions {
+		prefix := "  "
+		if i == cursor {
+			prefix = "> "
+		}
+		label := multiagent.RunTitle(run)
+		if i == m.sessionIndex {
+			label = activeStyle.Render(label)
+		}
+		line := fmt.Sprintf("%s%s", prefix, label)
+		lines = append(lines, truncateANSI(line, width-1))
+		if len(lines) >= height {
+			return lines[:height]
+		}
+	}
+
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	hints := []string{
+		truncateANSI(hintStyle.Render("-Sessions: Shift+↑/↓"), width-1),
+		truncateANSI(hintStyle.Render("-New session: Enter"), width-1),
+		truncateANSI(hintStyle.Render("-Delete session: Ctrl+D"), width-1),
+	}
+	for len(hints) > 0 && height-len(lines)-len(hints) < 0 {
+		hints = hints[:len(hints)-1]
+	}
+	need := height - len(lines) - len(hints)
+	for need > 0 {
+		lines = append(lines, "")
+		need--
+	}
+	lines = append(lines, hints...)
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return lines
+}
+
+func (m *tuiModel) renderSlavesLines(width int, height int) []string {
+	if height <= 0 {
+		return nil
+	}
+	var lines []string
+	title := lipgloss.NewStyle().Bold(true).Render("Slaves")
+	lines = append(lines, title)
+	if height == 1 {
+		return lines
+	}
+	lines = append(lines, "")
+
+	onlineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	online := make([]SlaveSummary, 0, len(m.slaves))
+	for _, s := range m.slaves {
+		if strings.EqualFold(strings.TrimSpace(s.Status), "online") {
+			online = append(online, s)
+		}
+	}
+	if len(online) == 0 {
+		lines = append(lines, truncateANSI(mutedStyle.Render("(no slaves online)"), width-1))
+	} else {
+		for _, s := range online {
+			label := strings.TrimSpace(s.SlaveID)
+			if name := strings.TrimSpace(s.Name); name != "" && strings.TrimSpace(s.SlaveID) != "" {
+				label = fmt.Sprintf("%s (%s)", name, strings.TrimSpace(s.SlaveID))
+			} else if name != "" {
+				label = name
+			}
+			age := formatAge(s.LastSeen)
+			line := fmt.Sprintf("%s %s", onlineStyle.Render("●"), label)
+			if age != "" {
+				line += " " + mutedStyle.Render(age)
+			}
+			lines = append(lines, truncateANSI(line, width-1))
+			if len(lines) >= height {
+				return lines[:height]
+			}
+		}
+	}
+
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return lines
+}
+
+func formatAge(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := time.Since(t)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
 }
 
 func (m *tuiModel) renderSessions(width int, height int) string {

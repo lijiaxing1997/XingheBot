@@ -77,6 +77,16 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+	case "master":
+		if err := runMaster(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case "slave":
+		if err := runSlave(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	case "worker":
 		if err := runWorker(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
@@ -113,7 +123,7 @@ func isChatInvocation(args []string) bool {
 		return true
 	}
 	switch args[0] {
-	case "worker", "skills":
+	case "worker", "skills", "master", "slave":
 		return false
 	default:
 		return true

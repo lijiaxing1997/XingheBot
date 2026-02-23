@@ -20,6 +20,23 @@
       "overflow_max_tool_result_chars": 50000
     }
   },
+  "cluster": {
+    "secret": "",
+    "tls": {
+      "enabled": false,
+      "cert_file": "",
+      "key_file": "",
+      "insecure_skip_verify": false
+    },
+    "files": {
+      "root_dir": ".cluster/files",
+      "max_file_bytes": 2147483648,
+      "max_total_bytes": 21474836480,
+      "retention_days": 7,
+      "chunk_size_bytes": 262144,
+      "max_inflight_chunks": 8
+    }
+  },
   "gateway": {
     "enabled": false,
     "email": {
