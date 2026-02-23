@@ -86,6 +86,9 @@ func (c *Coordinator) CreateAgent(runID string, spec AgentSpec) (AgentSpec, Agen
 	if err := os.MkdirAll(agentDir, 0o755); err != nil {
 		return AgentSpec{}, AgentState{}, err
 	}
+	if err := os.MkdirAll(filepath.Join(agentDir, "asset"), 0o755); err != nil {
+		return AgentSpec{}, AgentState{}, err
+	}
 
 	spec.ID = agentID
 	spec.RunID = run.ID

@@ -184,6 +184,8 @@ func (t *AgentSpawnTool) Call(ctx context.Context, args json.RawMessage) (string
 	}
 
 	agentDir := t.Coordinator.AgentDir(spec.RunID, spec.ID)
+	assetDir := filepath.Join(agentDir, "asset")
+	_ = os.MkdirAll(assetDir, 0o755)
 	stdoutPath := filepath.Join(agentDir, "stdout.log")
 	stderrPath := filepath.Join(agentDir, "stderr.log")
 	stdoutFile, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -266,6 +268,7 @@ func (t *AgentSpawnTool) Call(ctx context.Context, args json.RawMessage) (string
 		"pid":         cmd.Process.Pid,
 		"status":      state.Status,
 		"agent_dir":   agentDir,
+		"asset_dir":   assetDir,
 		"spec_path":   t.Coordinator.AgentSpecPath(spec.RunID, spec.ID),
 		"state_path":  t.Coordinator.AgentStatePath(spec.RunID, spec.ID),
 		"events_path": t.Coordinator.AgentEventsPath(spec.RunID, spec.ID),
@@ -444,7 +447,7 @@ func (t *AgentWaitTool) loadTargetStates(runID string, agentID string) ([]multia
 }
 
 type AgentControlTool struct {
-	Coordinator *multiagent.Coordinator
+	Coordinator        *multiagent.Coordinator
 	Executable         string
 	SkillsDir          string
 	ConfigPath         string
@@ -476,7 +479,7 @@ func (t *AgentControlTool) Definition() llm.ToolDefinition {
 						"type": "string",
 						"enum": []string{"pause", "resume", "cancel", "message"},
 					},
-					"payload":  map[string]any{"type": "object"},
+					"payload": map[string]any{"type": "object"},
 				},
 				"required": []string{"run_id", "agent_id", "command"},
 			},

@@ -122,6 +122,8 @@ type tuiModel struct {
 	loading            bool
 	busy               bool
 	notice             string
+	restartPending     bool
+	restartRequestedAt time.Time
 	banner             string
 	deleteConfirmRunID string
 	deleteConfirmAt    time.Time
@@ -320,7 +322,14 @@ func tuiDeleteSessionCmd(coord *multiagent.Coordinator, runID string) tea.Cmd {
 }
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if m.agent != nil && m.agent.RestartManager != nil && m.agent.RestartManager.IsRestartRequested() {
+	if !m.restartPending && m.restartRequested() {
+		m.restartPending = true
+		m.restartRequestedAt = time.Now().UTC()
+	}
+	if m.restartPending && !m.busy {
+		return m, tea.Quit
+	}
+	if m.restartPending && !m.restartRequestedAt.IsZero() && time.Since(m.restartRequestedAt) > 3*time.Second {
 		return m, tea.Quit
 	}
 
@@ -334,6 +343,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiAsyncMsg:
 		m.handleAsyncEvent(msg.Event)
 		m.rerender()
+		if m.restartPending && !m.busy {
+			return m, tea.Quit
+		}
 		return m, waitAsyncCmd(m.events)
 	case tuiInitMsg:
 		m.loading = true
@@ -372,7 +384,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rerender()
 		return m, nil
 	case tuiRefreshMsg:
-		if m.agent != nil && m.agent.RestartManager != nil && m.agent.RestartManager.IsRestartRequested() {
+		if m.restartPending && !m.busy {
 			return m, tea.Quit
 		}
 		if m.currentRunID() == "" {
@@ -385,6 +397,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.maybeAutoFollowup()
 		m.maybeProcessGatewayInbox()
 		m.rerender()
+		if m.restartPending && !m.busy {
+			return m, tea.Quit
+		}
 		return m, tuiTickCmd()
 	case tuiSessionCreatedMsg:
 		if msg.Err != nil {
@@ -482,6 +497,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+func (m tuiModel) restartRequested() bool {
+	return m.agent != nil && m.agent.RestartManager != nil && m.agent.RestartManager.IsRestartRequested()
 }
 
 const (
@@ -962,12 +981,12 @@ func (m *tuiModel) runTurnEmail(runID string, userText string, baseHistory []llm
 	}
 	err := runTUITurnStreaming(ctx, agentRef, runID, userTextForLLM, baseHistory, emit, afterTool)
 	if err != nil {
+		emit(llm.Message{Role: "system", Content: "ERROR: " + err.Error()})
 		if finalText == "" {
 			finalText = "ERROR: " + err.Error()
 		} else {
 			finalText += "\n\nERROR: " + err.Error()
 		}
-		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
 	}
 
 	if strings.TrimSpace(finalText) == "" {
@@ -1281,7 +1300,7 @@ func (m *tuiModel) runAutoFollowup(runID string, baseHistory []llm.Message, emai
 		userText += "\n\nReply style requirements (must follow):\n" + style
 	}
 	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit, nil); err != nil {
-		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
+		emit(llm.Message{Role: "system", Content: "ERROR: " + err.Error()})
 	}
 
 	if emailReply == nil || gw == nil {
@@ -1512,6 +1531,7 @@ func (m *tuiModel) ensureSessionLoaded(runID string) {
 	agentDir := m.coord.AgentDir(runID, tuiPrimaryAgentID)
 	historyPath := filepath.Join(agentDir, tuiHistoryFileName)
 	history, _ := readJSONL[llm.Message](historyPath, 2000)
+	history = sanitizeToolCallHistory(history)
 	m.sessionData[runID] = &tuiSessionData{
 		RunID:       runID,
 		HistoryPath: historyPath,
@@ -1810,7 +1830,7 @@ func (m *tuiModel) runTurn(runID string, userText string, baseHistory []llm.Mess
 		return m.maybeBuildWaitCompletionSystemMessages(runID, call, result, callErr)
 	}
 	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit, afterTool); err != nil {
-		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
+		emit(llm.Message{Role: "system", Content: "ERROR: " + err.Error()})
 	}
 }
 
@@ -1935,7 +1955,7 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 
 	turnHistory := []llm.Message{{Role: "user", Content: userText}}
 	reqMessages := append([]llm.Message{}, systemMsg, sessionMsg)
-	reqMessages = append(reqMessages, pruneHistoryAfterLastAutoCompaction(baseHistory)...)
+	reqMessages = append(reqMessages, filterHistoryForModel(pruneHistoryAfterLastAutoCompaction(baseHistory))...)
 	reqMessages = append(reqMessages, turnHistory...)
 
 	for {
@@ -2183,6 +2203,7 @@ func buildPrimaryLines(runID string, agentID string, history []llm.Message, widt
 	userStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	assistantStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
 	systemStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
+	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 
 	toolResults := make(map[string]string, 32)
 	toolSeen := make(map[string]bool, 32)
@@ -2247,11 +2268,96 @@ func buildPrimaryLines(runID string, agentID string, history []llm.Message, widt
 				addBlank()
 			}
 		case "system":
-			addWrapped("SYS: ", systemStyle, msg.Content)
+			content := strings.TrimSpace(msg.Content)
+			if strings.HasPrefix(content, "ERROR:") {
+				addWrapped("ERR: ", errorStyle, strings.TrimSpace(strings.TrimPrefix(content, "ERROR:")))
+			} else {
+				addWrapped("SYS: ", systemStyle, msg.Content)
+			}
 			addBlank()
 		}
 	}
 
+	return out
+}
+
+func sanitizeToolCallHistory(history []llm.Message) []llm.Message {
+	if len(history) == 0 {
+		return history
+	}
+
+	introduced := make(map[string]int, 64)
+	resolved := make(map[string]bool, 64)
+	validToolMsg := make([]bool, len(history))
+
+	for i, msg := range history {
+		switch strings.ToLower(strings.TrimSpace(msg.Role)) {
+		case "assistant":
+			for _, call := range msg.ToolCalls {
+				id := strings.TrimSpace(call.ID)
+				if id == "" {
+					continue
+				}
+				if _, ok := introduced[id]; ok {
+					continue
+				}
+				introduced[id] = i
+			}
+		case "tool":
+			id := strings.TrimSpace(msg.ToolCallID)
+			if id == "" {
+				continue
+			}
+			if introIdx, ok := introduced[id]; ok && introIdx < i {
+				resolved[id] = true
+				validToolMsg[i] = true
+			}
+		}
+	}
+
+	out := make([]llm.Message, 0, len(history))
+	for i, msg := range history {
+		switch strings.ToLower(strings.TrimSpace(msg.Role)) {
+		case "assistant":
+			if len(msg.ToolCalls) > 0 {
+				kept := make([]llm.ToolCall, 0, len(msg.ToolCalls))
+				for _, call := range msg.ToolCalls {
+					id := strings.TrimSpace(call.ID)
+					if id == "" || !resolved[id] {
+						continue
+					}
+					kept = append(kept, call)
+				}
+				msg.ToolCalls = kept
+				if len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.Content) == "" {
+					continue
+				}
+			}
+			out = append(out, msg)
+		case "tool":
+			if !validToolMsg[i] {
+				continue
+			}
+			out = append(out, msg)
+		default:
+			out = append(out, msg)
+		}
+	}
+
+	return out
+}
+
+func filterHistoryForModel(messages []llm.Message) []llm.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+	out := make([]llm.Message, 0, len(messages))
+	for _, msg := range messages {
+		if strings.EqualFold(strings.TrimSpace(msg.Role), "system") && strings.HasPrefix(strings.TrimSpace(msg.Content), "ERROR:") {
+			continue
+		}
+		out = append(out, msg)
+	}
 	return out
 }
 
@@ -2908,10 +3014,79 @@ func appendBlock(dst *[]string, block string) {
 }
 
 func wrapText(text string, width int) string {
-	if width <= 10 {
+	if width <= 10 || strings.TrimSpace(text) == "" {
 		return text
 	}
-	return lipgloss.NewStyle().Width(width).Render(text)
+
+	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		if line == "" {
+			out = append(out, "")
+			continue
+		}
+		out = append(out, hardWrapLine(line, width)...)
+	}
+	return strings.Join(out, "\n")
+}
+
+func hardWrapLine(line string, width int) []string {
+	if width <= 0 {
+		return []string{line}
+	}
+	if runewidth.StringWidth(line) <= width {
+		return []string{line}
+	}
+
+	remaining := line
+	wrapped := make([]string, 0, 4)
+	for len(remaining) > 0 && runewidth.StringWidth(remaining) > width {
+		visible := 0
+		breakAt := 0
+		lastSpace := -1
+
+		for i := 0; i < len(remaining); {
+			r, n := utf8.DecodeRuneInString(remaining[i:])
+			if r == utf8.RuneError && n == 1 {
+				i++
+				continue
+			}
+			if r == ' ' || r == '\t' {
+				lastSpace = i
+			}
+			rw := runewidth.RuneWidth(r)
+			if rw < 0 {
+				rw = 0
+			}
+			if visible+rw > width {
+				break
+			}
+			visible += rw
+			i += n
+			breakAt = i
+		}
+
+		if breakAt <= 0 {
+			// Extremely narrow width or invalid runes: consume one byte to avoid looping.
+			wrapped = append(wrapped, remaining[:1])
+			remaining = remaining[1:]
+			continue
+		}
+
+		splitAt := breakAt
+		if lastSpace >= 0 && lastSpace < breakAt && strings.TrimSpace(remaining[:lastSpace]) != "" {
+			splitAt = lastSpace + 1
+		}
+		wrapped = append(wrapped, remaining[:splitAt])
+		remaining = remaining[splitAt:]
+	}
+	if remaining != "" {
+		wrapped = append(wrapped, remaining)
+	}
+	if len(wrapped) == 0 {
+		return []string{line}
+	}
+	return wrapped
 }
 
 func readJSONL[T any](path string, limit int) ([]T, error) {

@@ -18,7 +18,10 @@ import (
 	"test_skill_agent/internal/multiagent"
 	"test_skill_agent/internal/restart"
 	"test_skill_agent/internal/skills"
+	"test_skill_agent/internal/supervisor"
 	"test_skill_agent/internal/tools"
+
+	"golang.org/x/term"
 )
 
 type runtimeOptions struct {
@@ -50,6 +53,16 @@ func (r *agentRuntime) Close() error {
 }
 
 func main() {
+	args := os.Args[1:]
+	if shouldAutoSuperviseChat(args) {
+		code, err := supervisor.RunForegroundLoop(args)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		os.Exit(code)
+	}
+
 	if len(os.Args) < 2 {
 		if err := runChat(os.Args[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
@@ -79,6 +92,31 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+	}
+}
+
+func shouldAutoSuperviseChat(args []string) bool {
+	if supervisor.IsSupervisedChild() || supervisor.SupervisorDisabled() {
+		return false
+	}
+	if !isChatInvocation(args) {
+		return false
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return false
+	}
+	return true
+}
+
+func isChatInvocation(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	switch args[0] {
+	case "worker", "skills":
+		return false
+	default:
+		return true
 	}
 }
 
@@ -168,11 +206,22 @@ func runChat(args []string) error {
 		return err
 	}
 	if rt.Restart != nil && rt.Restart.IsRestartRequested() {
-		if _, spawnErr := restart.SpawnReplacement("", os.Args[1:]); spawnErr != nil {
-			closeRuntime()
-			return spawnErr
+		closeRuntime()
+
+		// When supervised, signal the parent to respawn us.
+		if supervisor.IsSupervisedChild() {
+			os.Exit(restart.ExitCodeRestartRequested)
 		}
-		os.Exit(0)
+
+		// When not supervised, prefer exec() so the restarted TUI stays in the
+		// foreground job/process group.
+		if execErr := restart.ExecReplacement("", os.Args[1:]); execErr != nil {
+			if _, spawnErr := restart.SpawnReplacement("", os.Args[1:]); spawnErr != nil {
+				return joinErrors(execErr, spawnErr)
+			}
+			os.Exit(0)
+		}
+		return nil
 	}
 	closeRuntime()
 	return nil
@@ -207,6 +256,15 @@ func runWorker(args []string) error {
 		_ = ctl.Finish("", err)
 		return err
 	}
+
+	agentDir := coord.AgentDir(spec.RunID, spec.ID)
+	assetDir := filepath.Join(agentDir, "asset")
+	_ = os.MkdirAll(assetDir, 0o755)
+	_ = os.Setenv("MULTI_AGENT_RUN_ROOT", coord.RunRoot)
+	_ = os.Setenv("MULTI_AGENT_RUN_ID", spec.RunID)
+	_ = os.Setenv("MULTI_AGENT_AGENT_ID", spec.ID)
+	_ = os.Setenv("MULTI_AGENT_AGENT_DIR", agentDir)
+	_ = os.Setenv("MULTI_AGENT_ASSET_DIR", assetDir)
 
 	maxTokensValue := *maxTokens
 	if spec.MaxTokens > 0 {

@@ -196,6 +196,17 @@ func (a *Agent) buildSystemPrompt() string {
 	b.WriteString("If the user asks to refresh/reload MCP in natural language, execute mcp_reload automatically.\n")
 	b.WriteString("If you need to relaunch the app after changes, you can use /restart or call agent_restart.\n")
 	b.WriteString("\n")
+	b.WriteString("## Artifacts (multi-agent)\n")
+	b.WriteString("When you need to write temporary artifacts (reports, markdown, generated docs, images, etc.):\n")
+	b.WriteString("- If the user specifies an output location, follow it.\n")
+	b.WriteString("- If an applicable SKILL.md specifies an output location/layout, follow it.\n")
+	assetDirHint := strings.TrimSpace(os.Getenv("MULTI_AGENT_ASSET_DIR"))
+	if assetDirHint == "" {
+		assetDirHint = ".multi_agent/runs/<run_id>/agents/<agent_id>/asset/"
+	}
+	b.WriteString("- Otherwise, put them under your per-agent `asset/` directory: " + assetDirHint + "\n")
+	b.WriteString("- Create the `asset/` directory if missing; avoid cluttering the repo root with one-off artifacts.\n")
+	b.WriteString("\n")
 	b.WriteString("## Skills (mandatory)\n")
 	b.WriteString("Before replying: scan <available_skills> <description> entries.\n")
 	b.WriteString("- If exactly one skill clearly applies: load it with skill_load(name) and follow it.\n")

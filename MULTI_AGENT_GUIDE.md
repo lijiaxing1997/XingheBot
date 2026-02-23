@@ -23,6 +23,7 @@
 - `agents/<agent_id>/commands.jsonl`
 - `agents/<agent_id>/events.jsonl`
 - `agents/<agent_id>/result.json`
+- `agents/<agent_id>/asset/`（子 Agent 临时产物默认落地目录）
 - `agents/<agent_id>/stdout.log`
 - `agents/<agent_id>/stderr.log`
 - `signals/<key>.jsonl`
