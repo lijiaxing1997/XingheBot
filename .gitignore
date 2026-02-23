@@ -16,3 +16,6 @@ venv/
 .multi_agent/archive/
 .multi_agent/restart-sentinel.json
 .multi_agent/.restart-sentinel-*.json
+
+# Build artifacts
+dist/
