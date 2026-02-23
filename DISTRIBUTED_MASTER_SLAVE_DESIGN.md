@@ -241,13 +241,20 @@ payload 建议字段：
   "cluster": {
     "files": {
       "root_dir": ".cluster/files",
-      "max_file_bytes": 1073741824,
-      "max_total_bytes": 10737418240,
-      "retention_days": 7
+      "max_file_bytes": 2147483648,
+      "max_total_bytes": 21474836480,
+      "retention_days": 7,
+      "chunk_size_bytes": 262144,
+      "max_inflight_chunks": 8
     }
   }
 }
 ```
+
+默认建议（本次已确认）：
+- `root_dir` 使用 `.cluster/files`（不随 session/run 变化）
+- `max_file_bytes=2GiB`，`max_total_bytes=20GiB`，`retention_days=7`
+- 分片：`chunk_size_bytes=256KiB`，窗口：`max_inflight_chunks=8`（接收方给发送方的 backpressure 参数）
 
 Master 目录结构建议：
 
@@ -276,8 +283,7 @@ Master 目录结构建议：
 建议每次传输使用 `transfer_id`（uuid），并把“控制消息”与“数据分片”分开：
 
 - 控制面（JSON 文本帧）：`file.offer / file.accept / file.reject / file.complete / file.cancel / file.error / file.ack`
-- 数据面（推荐 WS binary 帧）：只承载分片 bytes，避免 base64 33% 体积膨胀  
-  - 若实现复杂度考虑，MVP 可先用 `file.chunk` JSON + base64，但务必保证 **不进入 LLM 上下文**（只在网关层转发/落盘）。
+- 数据面（本次已确认：**MVP 直接上 WS binary 分片**）：只承载分片 bytes，避免 base64 33% 体积膨胀。
 
 推荐流程（Push：发送方把文件推给接收方）：
 
@@ -723,3 +729,4 @@ skill 引导收集后执行：
 4) 多 Master 跨实例转发：未来演进项，本次不做；离线不投递，离线直接失败返回。
 5) TUI：Slave 列表仅展示，不做可操作。
 6) 自动部署：同时支持 key 与密码；密码全自动依赖 `sshpass`（否则走交互/提示安装）。
+7) 文件传输：`root_dir=.cluster/files`；默认配额 `max_file_bytes=2GiB`/`max_total_bytes=20GiB`；MVP 使用 WS binary 分片（非 base64）。
