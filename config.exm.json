@@ -8,6 +8,16 @@
     "reply_style": {
       "enabled": true,
       "md_path": "reply_style.md"
+    },
+    "auto_compaction": {
+      "enabled": true,
+      "max_attempts": 3,
+      "keep_last_user_turns": 6,
+      "summary_max_tokens": 512,
+      "summary_max_chars": 6000,
+      "summary_input_max_chars": 16000,
+      "hard_max_tool_result_chars": 400000,
+      "overflow_max_tool_result_chars": 50000
     }
   },
   "gateway": {
@@ -41,5 +51,5 @@
       "dry_run": false
     }
   },
-  "notes": "max_tokens=0 means omit the parameter (provider default applies). Set a positive value to allow longer single responses if your provider defaults are small."
+  "notes": "max_tokens=0 means omit the parameter (provider default applies). Set a positive value to allow longer single responses if your provider defaults are small.\n\nauto_compaction: configure assistant.auto_compaction. Set enabled=false to disable. max_attempts can be 0 to disable retry/summary (hard tool-result truncation still applies). Other numeric fields should be positive."
 }

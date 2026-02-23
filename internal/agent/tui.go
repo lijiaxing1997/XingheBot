@@ -719,9 +719,9 @@ func (m *tuiModel) recordGatewayEmailContext(runID string, replyTo string, reply
 		}
 		emailMeta["updated_at"] = now.Format(time.RFC3339)
 		emailMeta["thread"] = map[string]any{
-			"message_id": strings.TrimSpace(thread.MessageID),
+			"message_id":  strings.TrimSpace(thread.MessageID),
 			"in_reply_to": strings.TrimSpace(thread.InReplyTo),
-			"references": thread.References,
+			"references":  thread.References,
 		}
 		run.Metadata["email"] = emailMeta
 		return nil
@@ -1071,9 +1071,9 @@ func (m *tuiModel) maybeBuildWaitCompletionSystemMessages(runID string, call llm
 		return nil
 	}
 	var out struct {
-		TimedOut  bool                  `json:"timed_out"`
+		TimedOut  bool                    `json:"timed_out"`
 		States    []multiagent.AgentState `json:"states"`
-		CheckedAt time.Time             `json:"checked_at"`
+		CheckedAt time.Time               `json:"checked_at"`
 	}
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
 		return nil
@@ -1935,18 +1935,21 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 
 	turnHistory := []llm.Message{{Role: "user", Content: userText}}
 	reqMessages := append([]llm.Message{}, systemMsg, sessionMsg)
-	reqMessages = append(reqMessages, baseHistory...)
+	reqMessages = append(reqMessages, pruneHistoryAfterLastAutoCompaction(baseHistory)...)
 	reqMessages = append(reqMessages, turnHistory...)
 
 	for {
-		resp, err := a.Client.Chat(ctx, llm.ChatRequest{
+		resp, sentMessages, err := chatWithAutoCompaction(ctx, a.Client, llm.ChatRequest{
 			Messages:    reqMessages,
 			Tools:       toolDefs,
 			Temperature: a.Temperature,
+		}, a.AutoCompaction, func(summary llm.Message) {
+			emit(summary)
 		})
 		if err != nil {
 			return err
 		}
+		reqMessages = sentMessages
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) > 0 {
 			for i := range msg.ToolCalls {

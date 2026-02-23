@@ -91,6 +91,25 @@ worker 在结束时会自动向 run-level signals 发布 `agent_finished`（payl
 - `assistant.reply_style.md_path`: Markdown 文件路径（相对路径按 `config.json` 所在目录解析），示例：`reply_style.md`。
 - `assistant.reply_style.text`: 直接内联文本（优先级高于 `md_path`）。
 
+## 6.1 上下文自动压缩（auto_compaction，可选）
+
+当发生 context overflow（上下文超长）错误时，主 Agent 和子 Agent 会自动尝试：
+
+1) 截断过大的 tool 输出（避免单次工具结果占满上下文）。  
+2) 将较早的对话历史总结为一条 `[System Message]`，并保留最近 N 个 user turn。  
+3) 重试请求，最多 `max_attempts` 次。
+
+配置位置：`config.json` 的 `assistant.auto_compaction`。
+
+- `enabled`: 是否启用（默认 true）。
+- `max_attempts`: 最大重试次数（可设为 0 表示不做“总结+重试”，但仍会做 tool 输出硬截断）。
+- `keep_last_user_turns`: 总结时保留最近的 user turn 数（建议 >= 1）。
+- `summary_max_tokens`: 总结调用的输出 token 上限。
+- `summary_max_chars`: 注入到 system 的 summary 文本硬上限（字符）。
+- `summary_input_max_chars`: 送给 summarizer 的 transcript 文本上限（字符）。
+- `hard_max_tool_result_chars`: tool 输出硬截断上限（字符）。
+- `overflow_max_tool_result_chars`: overflow 恢复时更激进的 tool 截断上限（字符）。
+
 ## 7. 清理/归档建议
 
 `.multi_agent/runs` 会随着运行次数增多而变大/变乱，通常不需要长期保留所有 run。

@@ -31,6 +31,8 @@ type Agent struct {
 
 	RestartManager *restart.Manager
 	StartupBanner  string
+
+	AutoCompaction AutoCompactionConfig
 }
 
 type PromptMode string
@@ -60,11 +62,12 @@ type TaskOptions struct {
 
 func New(client *llm.Client, registry *tools.Registry, skillsDir string) (*Agent, error) {
 	a := &Agent{
-		Client:       client,
-		Tools:        registry,
-		SkillsDir:    skillsDir,
-		PromptMode:   PromptModeChat,
-		ChatToolMode: ChatToolModeDispatcher,
+		Client:         client,
+		Tools:          registry,
+		SkillsDir:      skillsDir,
+		PromptMode:     PromptModeChat,
+		ChatToolMode:   ChatToolModeDispatcher,
+		AutoCompaction: DefaultAutoCompactionConfig(),
 	}
 	if err := a.ReloadSkills(); err != nil {
 		return nil, err
@@ -327,14 +330,15 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 		reqMessages = append(reqMessages, turnHistory...)
 
 		for {
-			resp, err := a.Client.Chat(ctx, llm.ChatRequest{
+			resp, sentMessages, err := chatWithAutoCompaction(ctx, a.Client, llm.ChatRequest{
 				Messages:    reqMessages,
 				Tools:       toolDefs,
 				Temperature: a.Temperature,
-			})
+			}, a.AutoCompaction, nil)
 			if err != nil {
 				return err
 			}
+			reqMessages = sentMessages
 			msg := resp.Choices[0].Message
 			turnHistory = append(turnHistory, msg)
 			reqMessages = append(reqMessages, msg)
@@ -343,7 +347,9 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 				if msg.Content != "" {
 					fmt.Fprintln(out, msg.Content)
 				}
-				history = append(history, turnHistory...)
+				if len(reqMessages) > 0 {
+					history = append([]llm.Message{}, reqMessages[1:]...)
+				}
 				break
 			}
 
@@ -430,14 +436,15 @@ func (a *Agent) RunTask(ctx context.Context, task string, opts TaskOptions) (str
 			}
 		}
 
-		resp, err := a.Client.Chat(ctx, llm.ChatRequest{
+		resp, sentMessages, err := chatWithAutoCompaction(ctx, a.Client, llm.ChatRequest{
 			Messages:    reqMessages,
 			Tools:       a.Tools.Definitions(),
 			Temperature: a.Temperature,
-		})
+		}, a.AutoCompaction, nil)
 		if err != nil {
 			return "", err
 		}
+		reqMessages = sentMessages
 		msg := resp.Choices[0].Message
 		reqMessages = append(reqMessages, msg)
 

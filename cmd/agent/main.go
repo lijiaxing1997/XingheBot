@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -21,14 +22,14 @@ import (
 )
 
 type runtimeOptions struct {
-	SkillsDir      string
-	Temperature    float64
-	MaxTokens      int
-	ConfigPath     string
-	MCPConfigPath  string
-	MultiAgentRoot string
-	AutoCleanup    bool
-	AllowRestart   bool
+	SkillsDir        string
+	Temperature      float64
+	MaxTokens        int
+	ConfigPath       string
+	MCPConfigPath    string
+	MultiAgentRoot   string
+	AutoCleanup      bool
+	AllowRestart     bool
 	ControlPlaneOnly bool
 }
 
@@ -100,14 +101,14 @@ func runChat(args []string) error {
 	}
 
 	rt, err := newAgentRuntime(runtimeOptions{
-		SkillsDir:      resolvedSkillsDir,
-		Temperature:    *temperature,
-		MaxTokens:      *maxTokens,
-		ConfigPath:     *configPath,
-		MCPConfigPath:  *mcpConfigPath,
-		MultiAgentRoot: *multiAgentRoot,
-		AutoCleanup:    true,
-		AllowRestart:   true,
+		SkillsDir:        resolvedSkillsDir,
+		Temperature:      *temperature,
+		MaxTokens:        *maxTokens,
+		ConfigPath:       *configPath,
+		MCPConfigPath:    *mcpConfigPath,
+		MultiAgentRoot:   *multiAgentRoot,
+		AutoCleanup:      true,
+		AllowRestart:     true,
 		ControlPlaneOnly: controlPlaneOnly,
 	})
 	if err != nil {
@@ -134,6 +135,11 @@ func runChat(args []string) error {
 		fmt.Fprintln(os.Stderr, "warning:", err)
 	} else if strings.TrimSpace(replyStyle) != "" {
 		ag.SetReplyStyle(replyStyle)
+	}
+	if patch, ok, err := loadAutoCompactionPatchFromConfig(*configPath); err != nil {
+		fmt.Fprintln(os.Stderr, "warning:", err)
+	} else if ok {
+		ag.AutoCompaction = patch.ApplyTo(ag.AutoCompaction)
 	}
 
 	if rt.Restart != nil {
@@ -208,14 +214,14 @@ func runWorker(args []string) error {
 	}
 
 	rt, err := newAgentRuntime(runtimeOptions{
-		SkillsDir:      resolvedSkillsDir,
-		Temperature:    *temperature,
-		MaxTokens:      maxTokensValue,
-		ConfigPath:     *configPath,
-		MCPConfigPath:  *mcpConfigPath,
-		MultiAgentRoot: *multiAgentRoot,
-		AutoCleanup:    false,
-		AllowRestart:   false,
+		SkillsDir:        resolvedSkillsDir,
+		Temperature:      *temperature,
+		MaxTokens:        maxTokensValue,
+		ConfigPath:       *configPath,
+		MCPConfigPath:    *mcpConfigPath,
+		MultiAgentRoot:   *multiAgentRoot,
+		AutoCleanup:      false,
+		AllowRestart:     false,
 		ControlPlaneOnly: false,
 	})
 	if err != nil {
@@ -239,6 +245,11 @@ func runWorker(args []string) error {
 		ag.Temperature = float32(*spec.Temperature)
 	}
 	ag.MCPReload = rt.ReloadMCP
+	if patch, ok, err := loadAutoCompactionPatchFromConfig(*configPath); err != nil {
+		fmt.Fprintln(os.Stderr, "warning:", err)
+	} else if ok {
+		ag.AutoCompaction = patch.ApplyTo(ag.AutoCompaction)
+	}
 
 	result, runErr := ag.RunTask(context.Background(), spec.Task, agent.TaskOptions{
 		MaxTurns: spec.MaxTurns,
@@ -609,6 +620,22 @@ func loadReplyStyleFromConfig(configPath string) (string, error) {
 		return "", fmt.Errorf("load reply style md (%s): %w", mdPath, err)
 	}
 	return strings.TrimSpace(string(data)), nil
+}
+
+func loadAutoCompactionPatchFromConfig(configPath string) (agent.AutoCompactionConfigPatch, bool, error) {
+	cfg, err := llm.LoadConfig(configPath)
+	if err != nil {
+		return agent.AutoCompactionConfigPatch{}, false, err
+	}
+	raw := cfg.Assistant.AutoCompaction
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return agent.AutoCompactionConfigPatch{}, false, nil
+	}
+	var patch agent.AutoCompactionConfigPatch
+	if err := json.Unmarshal(raw, &patch); err != nil {
+		return agent.AutoCompactionConfigPatch{}, false, fmt.Errorf("parse config.json.assistant.auto_compaction: %w", err)
+	}
+	return patch, true, nil
 }
 
 func findGitRoot(startDir string) string {

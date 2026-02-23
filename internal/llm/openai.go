@@ -86,16 +86,17 @@ type Client struct {
 }
 
 type Config struct {
-	APIKey       string `json:"api_key"`
-	TavilyAPIKey string `json:"tavily_api_key"`
-	BaseURL      string `json:"base_url"`
-	Model        string `json:"model"`
-	MaxTokens    int    `json:"max_tokens"`
+	APIKey       string          `json:"api_key"`
+	TavilyAPIKey string          `json:"tavily_api_key"`
+	BaseURL      string          `json:"base_url"`
+	Model        string          `json:"model"`
+	MaxTokens    int             `json:"max_tokens"`
 	Assistant    AssistantConfig `json:"assistant"`
 }
 
 type AssistantConfig struct {
-	ReplyStyle ReplyStyleConfig `json:"reply_style"`
+	ReplyStyle     ReplyStyleConfig `json:"reply_style"`
+	AutoCompaction json.RawMessage  `json:"auto_compaction,omitempty"`
 }
 
 type ReplyStyleConfig struct {
