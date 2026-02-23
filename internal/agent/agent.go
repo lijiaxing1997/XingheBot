@@ -134,6 +134,27 @@ func (a *Agent) buildSystemPrompt() string {
 			b.WriteString("\n\n")
 		}
 
+		b.WriteString("## Child-Agent Capabilities (reference)\n")
+		b.WriteString("You are an orchestrator. In chat/dispatcher mode you typically CANNOT call these execution tools yourself.\n")
+		b.WriteString("Use this section to craft better agent_spawn tasks and to guide workers via agent_control(message).\n")
+		b.WriteString("\n")
+		b.WriteString("Child worker agents can:\n")
+		b.WriteString("- Use filesystem tools: list_files, read_file, write_file, edit_file, move_file, copy_file, delete_file.\n")
+		b.WriteString("- Run shell commands: exec_command.\n")
+		b.WriteString("- Search locally: search.\n")
+		b.WriteString("- Do web research (if configured): tavily_search, tavily_extract, tavily_crawl.\n")
+		b.WriteString("- Use skills: scan <available_skills>, then skill_load(name) to load SKILL.md and follow it. For skill management use skill_create/skill_install.\n")
+		b.WriteString("- Use MCP: call mcp_reload after MCP config changes; MCP tools are exposed as <server>__<tool> (example: calculator__add).\n")
+		b.WriteString("\n")
+		b.WriteString("Available skills (copy for your reference; workers also see this list):\n")
+		if len(a.SkillIndex) == 0 {
+			b.WriteString("<available_skills></available_skills>\n")
+		} else {
+			b.WriteString(skills.FormatSkillsForPrompt(a.SkillIndex))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+
 		b.WriteString("## System Messages\n")
 		b.WriteString("`[System Message] ...` blocks are internal context and are not user-visible by default.\n")
 		b.WriteString("If a [System Message] reports completed child-agent work and asks for a user update, rewrite it in your normal assistant voice and provide that update.\n")
@@ -141,8 +162,9 @@ func (a *Agent) buildSystemPrompt() string {
 
 		b.WriteString("## Orchestration Rules (chat mode)\n")
 		b.WriteString("1) Use child agents for execution. Your own work is planning + coordination + summarization.\n")
-		b.WriteString("2) After spawning child agents, do not block/wait unless the user explicitly requests waiting (e.g., \"等待完成/等结果/直到结束\").\n")
-		b.WriteString("3) Prefer non-blocking progress checks (agent_progress or subagents).\n")
+		b.WriteString("2) Default behavior: after spawning child agents, WAIT for completion (agent_wait), then fetch outputs (agent_result), then return the final result in one reply.\n")
+		b.WriteString("   - If the user explicitly requests async/non-blocking (e.g., \"不要等待/不用等/异步/下发后就返回\"), do NOT wait: spawn and return immediately with run_id/agent_id + how to check progress + how to steer.\n")
+		b.WriteString("3) When not waiting (user asked for async), avoid polling loops: use at most ONE progress snapshot (agent_progress or subagents) then return.\n")
 		b.WriteString("4) Batch multiple agent_spawn calls in one turn when possible.\n")
 		b.WriteString("\n")
 

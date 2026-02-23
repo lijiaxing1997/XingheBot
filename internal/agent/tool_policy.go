@@ -28,7 +28,9 @@ func newTurnToolPolicy(mode PromptMode, chatToolMode ChatToolMode, userText stri
 		p.AllowBlockingWait = true
 		return p
 	}
-	p.AllowBlockingWait = userExplicitlyRequestsBlockingWait(p.UserText) && !userExplicitlyDeclinesBlockingWait(p.UserText)
+	// Chat-mode default: wait for child agents unless the user explicitly asks for async/non-blocking behavior.
+	// This enables better UX for typical Q&A tasks (spawn -> wait -> return final answer).
+	p.AllowBlockingWait = !userExplicitlyDeclinesBlockingWait(p.UserText)
 	return p
 }
 
@@ -65,7 +67,7 @@ func (p *turnToolPolicy) allowTool(toolName string) error {
 		if p.AllowBlockingWait {
 			return nil
 		}
-		return errors.New("blocking waits are disabled in chat mode unless the user explicitly requests waiting")
+		return errors.New("blocking waits are disabled for this turn because the user requested async/non-blocking behavior")
 	}
 
 	// Dispatcher policy: primary agent should only operate the control-plane.

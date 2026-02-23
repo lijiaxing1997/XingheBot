@@ -16,10 +16,10 @@ func TestTurnToolPolicy_DispatcherBlocksNonAgentTools(t *testing.T) {
 	}
 }
 
-func TestTurnToolPolicy_BlocksWaitUnlessExplicit(t *testing.T) {
+func TestTurnToolPolicy_AllowsWaitByDefault(t *testing.T) {
 	p := newTurnToolPolicy(PromptModeChat, ChatToolModeDispatcher, "看一下子agent状态")
-	if err := p.allowTool("agent_wait"); err == nil {
-		t.Fatalf("expected agent_wait blocked without explicit waiting request")
+	if err := p.allowTool("agent_wait"); err != nil {
+		t.Fatalf("expected agent_wait allowed by default, got: %v", err)
 	}
 }
 
@@ -38,7 +38,7 @@ func TestTurnToolPolicy_DontWaitOverridesWaitPhrase(t *testing.T) {
 }
 
 func TestTurnToolPolicy_LimitsProgressPollingWhenNonBlocking(t *testing.T) {
-	p := newTurnToolPolicy(PromptModeChat, ChatToolModeDispatcher, "看一下进度")
+	p := newTurnToolPolicy(PromptModeChat, ChatToolModeDispatcher, "不要等待，看一下进度")
 	for i := 0; i < 3; i++ {
 		if err := p.allowTool("agent_progress"); err != nil {
 			t.Fatalf("expected agent_progress allowed at i=%d, got: %v", i, err)

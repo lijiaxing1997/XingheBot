@@ -72,7 +72,7 @@
 
 worker 在结束时会自动向 run-level signals 发布 `agent_finished`（payload 包含 `agent_id/status/finished_at/result_path/output_preview` 等）。
 
-- 需要阻塞等待可用：`agent_signal_wait`（注意：chat/dispatcher 模式默认禁止阻塞等待，除非用户明确要求等待）。
+- 需要阻塞等待可用：`agent_signal_wait`（注意：当用户明确写了“不要等待/不用等/异步/不阻塞/下发后就返回”等表达时，chat/dispatcher 模式会禁用阻塞等待工具，避免误用）。
 
 ## 5. CLI 入口
 
