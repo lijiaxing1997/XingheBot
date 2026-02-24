@@ -24,6 +24,21 @@
       "overflow_max_tool_result_chars": 50000
     }
   },
+  "memory": {
+    "enabled": true,
+    "workspace_dir": "~/.xinghebot/workspace",
+    "project_key": "",
+    "root_dir": "",
+    "backend": "sqlite_hybrid",
+    "auto_flush_on_compaction": true,
+    "auto_capture_on_new_session": true,
+    "index_history_jsonl": false,
+    "max_results": 10,
+    "redaction": {
+      "enabled": true,
+      "patterns": ["sk-", "tvly-", "AKIA", "-----BEGIN", "authorization_code"]
+    }
+  },
   "start_params": {
     "slave": {
       "master": "ws://MASTER_IP:7788/ws",

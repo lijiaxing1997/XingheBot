@@ -48,7 +48,7 @@ func (p turnToolPolicy) toolVisible(name string) bool {
 	}
 
 	if p.ChatToolMode == ChatToolModeDispatcher {
-		return strings.HasPrefix(tool, "agent_") || tool == "subagents" || strings.HasPrefix(tool, "remote_")
+		return strings.HasPrefix(tool, "agent_") || tool == "subagents" || strings.HasPrefix(tool, "remote_") || strings.HasPrefix(tool, "memory_")
 	}
 
 	return true
@@ -72,7 +72,7 @@ func (p *turnToolPolicy) allowTool(toolName string) error {
 
 	// Dispatcher policy: primary agent should only operate the control-plane.
 	if p.ChatToolMode == ChatToolModeDispatcher {
-		if strings.HasPrefix(name, "agent_") || name == "subagents" || strings.HasPrefix(name, "remote_") {
+		if strings.HasPrefix(name, "agent_") || name == "subagents" || strings.HasPrefix(name, "remote_") || strings.HasPrefix(name, "memory_") {
 			if !p.AllowBlockingWait && isProgressTool(name) {
 				const maxProgressCalls = 3
 				if p.progressCalls >= maxProgressCalls {
@@ -82,7 +82,7 @@ func (p *turnToolPolicy) allowTool(toolName string) error {
 			}
 			return nil
 		}
-		return fmt.Errorf("tool %q is disabled in chat/dispatcher mode; spawn a child agent to do real work", name)
+		return fmt.Errorf("tool %q is disabled in chat/dispatcher mode; spawn a child agent to do real work (memory_* is allowed for long-term recall)", name)
 	}
 
 	return nil

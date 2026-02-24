@@ -146,7 +146,8 @@ func (a *Agent) buildSystemPrompt() string {
 		}
 
 		b.WriteString("## Child-Agent Capabilities (reference)\n")
-		b.WriteString("You are an orchestrator. In chat/dispatcher mode you typically CANNOT call these execution tools yourself.\n")
+		b.WriteString("You are an orchestrator. In chat/dispatcher mode you typically CANNOT call execution tools yourself.\n")
+		b.WriteString("Exception: you MAY call memory_* tools for cross-session recall (memory_search/memory_get) and durable notes (memory_append).\n")
 		b.WriteString("Use this section to craft better agent_spawn tasks and to guide workers via agent_control(message).\n")
 		b.WriteString("\n")
 		b.WriteString("Child worker agents can:\n")
@@ -178,6 +179,11 @@ func (a *Agent) buildSystemPrompt() string {
 		b.WriteString("3) When not waiting (user asked for async), avoid polling loops: use at most ONE progress snapshot (agent_progress or subagents) then return.\n")
 		b.WriteString("4) Batch multiple agent_spawn calls in one turn when possible.\n")
 		b.WriteString("\n")
+		b.WriteString("## Long-term Memory (cross-session)\n")
+		b.WriteString("- When the user asks about previous decisions, preferences, TODOs, names, dates, or \"what we did last time\": ALWAYS call memory_search before answering.\n")
+		b.WriteString("- Use memory_get to fetch the exact lines you need.\n")
+		b.WriteString("- When the user explicitly asks to remember something (\"记住/以后都这样/下次提醒\") or you want to store a durable decision: use memory_append.\n")
+		b.WriteString("\n")
 
 		b.WriteString("Child-agent task template (when calling agent_spawn):\n")
 		b.WriteString("- Goal: one sentence.\n")
@@ -195,6 +201,11 @@ func (a *Agent) buildSystemPrompt() string {
 	b.WriteString("When MCP config/server setup changes at runtime, use mcp_reload to refresh MCP tools without restarting the agent.\n")
 	b.WriteString("If the user asks to refresh/reload MCP in natural language, execute mcp_reload automatically.\n")
 	b.WriteString("If you need to relaunch the app after changes, you can use /restart or call agent_restart.\n")
+	b.WriteString("\n")
+	b.WriteString("## Long-term Memory (cross-session)\n")
+	b.WriteString("- When asked about previous decisions, preferences, TODOs, names, dates, or \"what we did last time\": ALWAYS call memory_search first.\n")
+	b.WriteString("- Use memory_get to retrieve the exact snippet before quoting/using it.\n")
+	b.WriteString("- Use memory_append to store durable preferences/decisions/TODOs (it redacts common secrets; still avoid writing secrets).\n")
 	b.WriteString("\n")
 	b.WriteString("## Artifacts (multi-agent)\n")
 	b.WriteString("When you need to write temporary artifacts (reports, markdown, generated docs, images, etc.):\n")
@@ -237,7 +248,7 @@ func (a *Agent) buildSystemPrompt() string {
 		b.WriteString("For complex tasks, you may create parallel child agents with agent_run_create + agent_spawn.\n")
 		b.WriteString("You are running as the PRIMARY (gateway) agent in chat mode. You MUST behave like an asynchronous dispatcher.\n")
 		if a.ChatToolMode == ChatToolModeDispatcher {
-			b.WriteString("Tool policy (chat/dispatcher mode): You MUST NOT call direct filesystem/exec tools. Only use agent_* tools, subagents (orchestration), skill_* tools (skill management), and mcp_reload. To do real work, spawn child agents.\n")
+			b.WriteString("Tool policy (chat/dispatcher mode): You MUST NOT call direct filesystem/exec tools. Only use agent_* tools, subagents (orchestration), remote_* tools, memory_* tools (long-term memory), skill_* tools (skill management), and mcp_reload. To do real work, spawn child agents.\n")
 			b.WriteString("Progress checks must be non-blocking unless the user explicitly asks you to wait until completion.\n")
 		}
 		b.WriteString("\n")

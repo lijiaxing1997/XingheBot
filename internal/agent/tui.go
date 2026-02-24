@@ -26,6 +26,7 @@ import (
 	"test_skill_agent/internal/cluster"
 	"test_skill_agent/internal/gateway"
 	"test_skill_agent/internal/llm"
+	"test_skill_agent/internal/memory"
 	"test_skill_agent/internal/multiagent"
 	"test_skill_agent/internal/restart"
 )
@@ -162,6 +163,12 @@ type tuiRefreshMsg struct{}
 type tuiSessionCreatedMsg struct {
 	Run multiagent.RunManifest
 	Err error
+}
+
+type tuiSessionCapturedMsg struct {
+	RunID string
+	Path  string
+	Err   error
 }
 
 type tuiSessionDeletedMsg struct {
@@ -431,6 +438,36 @@ func tuiCreateSessionCmd(coord *multiagent.Coordinator) tea.Cmd {
 	}
 }
 
+func tuiCaptureSessionToMemoryCmd(ctx context.Context, coord *multiagent.Coordinator, configPath string, runID string) tea.Cmd {
+	return func() tea.Msg {
+		id := strings.TrimSpace(runID)
+		if coord == nil || id == "" {
+			return tuiSessionCapturedMsg{RunID: id}
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		cfg, err := memory.LoadConfig(configPath)
+		if err != nil {
+			return tuiSessionCapturedMsg{RunID: id, Err: err}
+		}
+		if cfg.AutoCaptureOnNewSession != nil && !*cfg.AutoCaptureOnNewSession {
+			return tuiSessionCapturedMsg{RunID: id}
+		}
+		cwd, _ := os.Getwd()
+		paths, err := memory.ResolvePaths(cfg, cwd)
+		if err != nil {
+			return tuiSessionCapturedMsg{RunID: id, Err: err}
+		}
+		historyPath := filepath.Join(coord.AgentDir(id, tuiPrimaryAgentID), tuiHistoryFileName)
+		out, err := memory.CaptureSessionFromHistory(ctx, cfg, paths.RootDir, id, historyPath, 80, time.Now().UTC())
+		if err != nil {
+			return tuiSessionCapturedMsg{RunID: id, Err: err}
+		}
+		return tuiSessionCapturedMsg{RunID: id, Path: strings.TrimSpace(out.Path)}
+	}
+}
+
 func tuiDeleteSessionCmd(coord *multiagent.Coordinator, runID string) tea.Cmd {
 	return func() tea.Msg {
 		err := coord.DeleteRun(runID)
@@ -522,6 +559,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tuiTickCmd()
 	case tuiSessionCreatedMsg:
+		prevRunID := m.currentRunID()
 		if msg.Err != nil {
 			m.notice = msg.Err.Error()
 			return m, nil
@@ -534,6 +572,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshAgentIDs()
 		m.notice = ""
 		m.rerender()
+		if strings.TrimSpace(prevRunID) != "" && strings.TrimSpace(prevRunID) != strings.TrimSpace(msg.Run.ID) {
+			return m, tuiCaptureSessionToMemoryCmd(m.ctx, m.coord, m.gatewayConfigPath, prevRunID)
+		}
+		return m, nil
+	case tuiSessionCapturedMsg:
+		if msg.Err != nil {
+			m.notice = msg.Err.Error()
+			return m, nil
+		}
+		if strings.TrimSpace(msg.Path) != "" {
+			m.notice = "Captured previous session to long-term memory: " + strings.TrimSpace(msg.Path)
+		}
 		return m, nil
 	case tuiSessionDeletedMsg:
 		if msg.Err != nil {
@@ -880,6 +930,7 @@ func (m *tuiModel) recordGatewayEmailContext(runID string, replyTo string, reply
 }
 
 func (m *tuiModel) ensureEmailSession(subjectKey string) (string, error) {
+	prevRunID := m.currentRunID()
 	key := strings.TrimSpace(subjectKey)
 	if key == "" {
 		key = "(无主题)"
@@ -944,6 +995,19 @@ func (m *tuiModel) ensureEmailSession(subjectKey string) (string, error) {
 	m.cursorLine = -1
 	m.stickToBottom = true
 	m.rerender()
+	if strings.TrimSpace(prevRunID) != "" && strings.TrimSpace(prevRunID) != strings.TrimSpace(updated.ID) && m.events != nil {
+		capture := tuiCaptureSessionToMemoryCmd(m.ctx, m.coord, m.gatewayConfigPath, prevRunID)
+		go func() {
+			if capture == nil {
+				return
+			}
+			msg := capture()
+			if msg == nil {
+				return
+			}
+			m.events <- tuiAsyncMsg{Event: msg}
+		}()
+	}
 	return updated.ID, nil
 }
 
@@ -1724,6 +1788,10 @@ func (m *tuiModel) handleAsyncEvent(evt tea.Msg) {
 		}
 	case tuiSetNoticeMsg:
 		m.notice = strings.TrimSpace(msg.Text)
+	case tuiSessionCapturedMsg:
+		if msg.Err != nil {
+			m.notice = strings.TrimSpace(msg.Err.Error())
+		}
 	case tuiRunManifestUpdatedMsg:
 		if msg.Err != nil {
 			m.notice = strings.TrimSpace(msg.Err.Error())
@@ -2629,6 +2697,7 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 	reqMessages = append(reqMessages, filterHistoryForModel(pruneHistoryAfterLastAutoCompaction(baseHistory))...)
 	reqMessages = append(reqMessages, turnHistory...)
 
+	didAutoFlush := false
 	for {
 		resp, sentMessages, err := chatWithAutoCompaction(ctx, a.Client, llm.ChatRequest{
 			Messages:    reqMessages,
@@ -2636,6 +2705,40 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 			Temperature: a.Temperature,
 		}, a.AutoCompaction, func(summary llm.Message) {
 			emit(summary)
+			if didAutoFlush {
+				return
+			}
+			didAutoFlush = true
+			if a.Tools == nil {
+				return
+			}
+			rawArgs, err := json.Marshal(map[string]any{
+				"text":   summary.Content,
+				"source": strings.TrimSpace(runID),
+				"auto":   true,
+			})
+			if err != nil {
+				return
+			}
+			result, flushErr := a.Tools.Call(toolCtx, "memory_flush", rawArgs)
+			if flushErr != nil || strings.TrimSpace(result) == "" {
+				return
+			}
+			var payload struct {
+				Path     string `json:"path"`
+				Appended int    `json:"appended"`
+				Disabled bool   `json:"disabled"`
+			}
+			if json.Unmarshal([]byte(result), &payload) == nil {
+				if payload.Disabled || payload.Appended <= 0 || strings.TrimSpace(payload.Path) == "" {
+					return
+				}
+				emit(llm.Message{
+					Role: "system",
+					Content: "[System Message] Long-term memory flush completed automatically after compaction: " +
+						"appended " + fmt.Sprintf("%d", payload.Appended) + " item(s) to " + payload.Path + ".",
+				})
+			}
 		})
 		if err != nil {
 			return err

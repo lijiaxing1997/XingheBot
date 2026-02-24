@@ -499,6 +499,8 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 		reloadMCP  func(context.Context) (string, error)
 		mcpRuntime *mcpclient.Runtime
 	)
+
+	registerMemoryTools(registry, opts.ConfigPath)
 	if !opts.ControlPlaneOnly {
 		registerCoreTools(registry, opts.SkillsDir, opts.ConfigPath)
 
@@ -621,6 +623,16 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 			return nil
 		},
 	}, nil
+}
+
+func registerMemoryTools(registry *tools.Registry, configPath string) {
+	if registry == nil {
+		return
+	}
+	registry.Register(&tools.MemorySearchTool{ConfigPath: configPath})
+	registry.Register(&tools.MemoryGetTool{ConfigPath: configPath})
+	registry.Register(&tools.MemoryAppendTool{ConfigPath: configPath})
+	registry.Register(&tools.MemoryFlushTool{ConfigPath: configPath})
 }
 
 func registerCoreTools(registry *tools.Registry, skillsDir string, configPath string) {
