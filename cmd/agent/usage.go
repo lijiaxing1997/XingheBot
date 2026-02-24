@@ -117,6 +117,7 @@ Options:
   --skills-dir <dir>         Skills dir (default: ./skills or $SKILLS_DIR)
   --multi-agent-root <dir>   Multi-agent run storage (default: ./.multi_agent/runs)
 
+  --ui <plain|tui>           UI mode (default: plain)
   --master <ws_url>          Master websocket url (required unless set in start_params.slave.master)
   --id <slave_id>            Stable slave id (optional)
   --name <name>              Display name (optional)
@@ -162,4 +163,3 @@ Examples:
   %s skills install --repo owner/repo --path skills/my-skill --ref main
 `, bin, bin, bin, bin)
 }
-

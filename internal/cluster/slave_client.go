@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -29,6 +30,7 @@ type SlaveClientOptions struct {
 	InsecureSkipVerify bool
 	Runner             AgentRunner
 	MaxInflightRuns    int
+	StopRequested      func() bool
 	Logf               func(format string, args ...any)
 }
 
@@ -51,13 +53,19 @@ type SlaveClient struct {
 	inflight chan struct{}
 	wg       sync.WaitGroup
 
-	fileMu            sync.Mutex
+	fileMu             sync.Mutex
 	pendingFileReplies map[string]chan fileOfferReply
 	pendingFileAcks    map[string]chan FileAckPayload
 	incomingTransfers  map[string]*incomingFileTransfer
 
+	stopRequested func() bool
+	draining      atomic.Bool
+	activeRuns    atomic.Int64
+
 	logf func(format string, args ...any)
 }
+
+var ErrStopRequested = errors.New("stop requested")
 
 func NewSlaveClient(opts SlaveClientOptions) (*SlaveClient, error) {
 	url := strings.TrimSpace(opts.MasterURL)
@@ -116,6 +124,7 @@ func NewSlaveClient(opts SlaveClientOptions) (*SlaveClient, error) {
 		pendingFileReplies: make(map[string]chan fileOfferReply),
 		pendingFileAcks:    make(map[string]chan FileAckPayload),
 		incomingTransfers:  make(map[string]*incomingFileTransfer),
+		stopRequested:      opts.StopRequested,
 		logf:               logf,
 	}, nil
 }
@@ -135,38 +144,40 @@ func (c *SlaveClient) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	backoff := 1 * time.Second
-	const backoffMax = 30 * time.Second
-
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if c.stopRequested != nil && c.stopRequested() {
+			c.draining.Store(true)
+			if c.activeRuns.Load() == 0 {
+				return ErrStopRequested
+			}
+		}
 		err := c.runOnce(ctx)
 		if err == nil {
-			backoff = 1 * time.Second
 			continue
+		}
+		if errors.Is(err, ErrStopRequested) {
+			return err
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		c.logf("slave: disconnected slave_id=%s err=%v", c.slaveID, err)
+		c.logf("ws: disconnected slave_id=%s err=%v", c.slaveID, err)
 
-		jitter := time.Duration(rand.IntN(500)) * time.Millisecond
-		sleep := backoff + jitter
-		if sleep > backoffMax {
-			sleep = backoffMax
+		retry := c.heartbeatInterval
+		if retry <= 0 {
+			retry = 5 * time.Second
 		}
+		jitter := time.Duration(rand.IntN(250)) * time.Millisecond
+		sleep := retry + jitter
 		timer := time.NewTimer(sleep)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return ctx.Err()
 		case <-timer.C:
-		}
-		backoff *= 2
-		if backoff > backoffMax {
-			backoff = backoffMax
 		}
 	}
 }
@@ -187,6 +198,8 @@ func (c *SlaveClient) runOnce(ctx context.Context) error {
 			},
 		}
 	}
+
+	c.logf("ws: connecting slave_id=%s master=%s", c.slaveID, c.masterURL)
 	conn, _, err := websocket.Dial(dialCtx, c.masterURL, &dialOpts)
 	if err != nil {
 		return err
@@ -212,8 +225,11 @@ func (c *SlaveClient) runOnce(ctx context.Context) error {
 	if ack.HeartbeatIntervalMillis > 0 {
 		hb = time.Duration(ack.HeartbeatIntervalMillis) * time.Millisecond
 	}
+	c.heartbeatInterval = hb
 	ticker := time.NewTicker(hb)
 	defer ticker.Stop()
+	stopTicker := time.NewTicker(300 * time.Millisecond)
+	defer stopTicker.Stop()
 
 	readErr := make(chan error, 1)
 	go func() {
@@ -253,7 +269,7 @@ func (c *SlaveClient) runOnce(ctx context.Context) error {
 		}
 	}()
 
-	c.logf("slave: registered slave_id=%s server_instance=%s", c.slaveID, ack.ServerInstanceID)
+	c.logf("ws: registered slave_id=%s server_instance=%s", c.slaveID, ack.ServerInstanceID)
 
 	for {
 		select {
@@ -261,6 +277,13 @@ func (c *SlaveClient) runOnce(ctx context.Context) error {
 			return connCtx.Err()
 		case err := <-readErr:
 			return err
+		case <-stopTicker.C:
+			if c.stopRequested != nil && c.stopRequested() {
+				c.draining.Store(true)
+				if c.activeRuns.Load() == 0 {
+					return ErrStopRequested
+				}
+			}
 		case <-ticker.C:
 			hbEnv, err := NewEnvelope(MsgTypeHeartbeat, "", HeartbeatPayload{SlaveID: c.slaveID})
 			if err != nil {
@@ -343,8 +366,20 @@ func (c *SlaveClient) dispatchAgentRun(ctx context.Context, session *SlaveSessio
 	if c == nil {
 		return
 	}
+	if c.stopRequested != nil && c.stopRequested() {
+		c.draining.Store(true)
+	}
+	if c.draining.Load() {
+		c.logf("cmd: agent_run rejected (restarting) request_id=%s", strings.TrimSpace(requestID))
+		c.sendAgentResult(ctx, session, requestID, AgentResultPayload{
+			Status: "failed",
+			Error:  "slave is restarting",
+		})
+		return
+	}
 	task := strings.TrimSpace(req.Task)
 	if task == "" {
+		c.logf("cmd: agent_run rejected (empty task) request_id=%s", strings.TrimSpace(requestID))
 		c.sendAgentResult(ctx, session, requestID, AgentResultPayload{
 			Status: "failed",
 			Error:  "task is required",
@@ -352,9 +387,20 @@ func (c *SlaveClient) dispatchAgentRun(ctx context.Context, session *SlaveSessio
 		return
 	}
 
+	c.logf(
+		"cmd: agent_run received request_id=%s timeout_seconds=%d max_turns=%d max_tokens=%d temperature=%v task=%s",
+		strings.TrimSpace(requestID),
+		req.Options.TimeoutSeconds,
+		req.Options.MaxTurns,
+		req.Options.MaxTokens,
+		req.Options.Temperature,
+		previewOneLine(task, 200),
+	)
+
 	select {
 	case c.inflight <- struct{}{}:
 	default:
+		c.logf("cmd: agent_run rejected (busy) request_id=%s max_inflight=%d", strings.TrimSpace(requestID), cap(c.inflight))
 		c.sendAgentResult(ctx, session, requestID, AgentResultPayload{
 			Status: "busy",
 			Error:  "slave is busy (max inflight reached)",
@@ -362,10 +408,12 @@ func (c *SlaveClient) dispatchAgentRun(ctx context.Context, session *SlaveSessio
 		return
 	}
 
+	c.activeRuns.Add(1)
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
 		defer func() { <-c.inflight }()
+		defer c.activeRuns.Add(-1)
 
 		start := time.Now()
 		runCtx := ctx
@@ -383,7 +431,13 @@ func (c *SlaveClient) dispatchAgentRun(ctx context.Context, session *SlaveSessio
 		if c.runner == nil {
 			err = errors.New("no runner configured on slave")
 		} else {
-			out, runID, err = c.runner.Run(runCtx, task, req.Options, req.Metadata)
+			metadata := map[string]any{
+				"request_id": strings.TrimSpace(requestID),
+			}
+			for k, v := range req.Metadata {
+				metadata[k] = v
+			}
+			out, runID, err = c.runner.Run(runCtx, task, req.Options, metadata)
 		}
 
 		dur := time.Since(start)
@@ -397,6 +451,15 @@ func (c *SlaveClient) dispatchAgentRun(ctx context.Context, session *SlaveSessio
 			res.Status = "failed"
 			res.Error = err.Error()
 		}
+		c.logf(
+			"cmd: agent_run finished request_id=%s status=%s duration_ms=%d run_id=%s error=%s output=%s",
+			strings.TrimSpace(requestID),
+			strings.TrimSpace(res.Status),
+			res.DurationMS,
+			strings.TrimSpace(runID),
+			previewOneLine(res.Error, 160),
+			previewOneLine(out, 240),
+		)
 		c.sendAgentResult(ctx, session, requestID, res)
 	}()
 }
@@ -424,4 +487,15 @@ func truncateString(s string, max int) string {
 		return s[:max]
 	}
 	return s[:max-14] + "\n... (truncated)"
+}
+
+func previewOneLine(s string, max int) string {
+	text := strings.TrimSpace(s)
+	if text == "" {
+		return ""
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.Join(strings.Fields(text), " ")
+	return truncateString(text, max)
 }

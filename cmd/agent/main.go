@@ -79,7 +79,7 @@ func main() {
 		printRootUsage(os.Stdout)
 		return
 	}
-	if shouldAutoSuperviseChat(args) {
+	if shouldAutoSuperviseChat(args) || shouldAutoSuperviseSlave(args) {
 		code, err := supervisor.RunForegroundLoop(args)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
@@ -144,6 +144,25 @@ func shouldAutoSuperviseChat(args []string) bool {
 		return false
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return false
+	}
+	return true
+}
+
+func shouldAutoSuperviseSlave(args []string) bool {
+	if supervisor.IsSupervisedChild() || supervisor.SupervisorDisabled() {
+		return false
+	}
+	if len(args) == 0 {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(args[0]), "slave") {
+		return false
+	}
+	if hasInitFlag(args) {
+		return false
+	}
+	if hasHelpFlag(args) {
 		return false
 	}
 	return true

@@ -17,7 +17,11 @@ import (
 	"test_skill_agent/internal/agent"
 	"test_skill_agent/internal/appinfo"
 	"test_skill_agent/internal/cluster"
+	"test_skill_agent/internal/llm"
 	"test_skill_agent/internal/multiagent"
+	"test_skill_agent/internal/restart"
+	"test_skill_agent/internal/slavelog"
+	"test_skill_agent/internal/supervisor"
 	"test_skill_agent/internal/tools"
 )
 
@@ -298,11 +302,12 @@ func runSlave(args []string) error {
 	skillsDir := fs.String("skills-dir", defaultSkillsDir(), "skills directory")
 	temperature := fs.Float64("temperature", 0.2, "LLM temperature")
 	maxTokens := fs.Int("max-tokens", 0, "max tokens for completion (overrides config)")
+	uiMode := fs.String("ui", "plain", "ui mode: plain (default) or tui")
 	configPath := fs.String("config", "slave-config.json", "path to config.json")
 	mcpConfigPath := fs.String("mcp-config", "mcp.json", "path to MCP config")
 	multiAgentRoot := fs.String("multi-agent-root", ".multi_agent/runs", "path to multi-agent run storage")
 	masterURL := fs.String("master", "", "master websocket url (ws://... or wss://...)")
-	name := fs.String("name", "", "display name (for TUI)")
+	name := fs.String("name", "", "display name")
 	slaveID := fs.String("id", "", "stable slave id (optional)")
 	tags := fs.String("tags", "", "comma-separated tags (k=v,k=v)")
 	heartbeat := fs.Duration("heartbeat", 5*time.Second, "heartbeat interval")
@@ -381,6 +386,17 @@ func runSlave(args []string) error {
 		return fmt.Errorf("cluster.secret missing/invalid in %s (copy it from the master config): %w", strings.TrimSpace(*configPath), err)
 	}
 
+	uiRaw := strings.ToLower(strings.TrimSpace(*uiMode))
+	isTUI := false
+	switch uiRaw {
+	case "", "plain":
+		// default
+	case "tui":
+		isTUI = true
+	default:
+		return fmt.Errorf("--ui must be tui or plain")
+	}
+
 	rt, err := newAgentRuntime(runtimeOptions{
 		SkillsDir:        resolvedSkillsDir,
 		Temperature:      *temperature,
@@ -389,38 +405,94 @@ func runSlave(args []string) error {
 		MCPConfigPath:    *mcpConfigPath,
 		MultiAgentRoot:   *multiAgentRoot,
 		AutoCleanup:      true,
-		AllowRestart:     false,
+		AllowRestart:     true,
 		ControlPlaneOnly: true,
 	})
 	if err != nil {
 		return err
 	}
-	defer func() {
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var logger *slavelog.Logger
+	closeRuntime := func() {
+		cancel()
+		if logger != nil {
+			_ = logger.Close()
+		}
 		if err := rt.Close(); err != nil {
 			fmt.Fprintln(os.Stderr, "warning:", err)
 		}
-	}()
+	}
 
-	ag, err := agent.New(rt.Client, rt.Registry, resolvedSkillsDir)
+	runRoot := resolvePath(*multiAgentRoot)
+	logDir := filepath.Dir(runRoot)
+	if strings.TrimSpace(logDir) == "" {
+		logDir = ".multi_agent"
+	}
+	_ = os.MkdirAll(logDir, 0o755)
+	logPath := filepath.Join(logDir, fmt.Sprintf("slave-%s.log", time.Now().Format("20060102-150405")))
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
+		closeRuntime()
 		return err
 	}
-	ag.SetPromptMode(agent.PromptModeChat)
-	ag.SetChatToolMode(agent.ChatToolModeDispatcher)
-	ag.Temperature = float32(*temperature)
+	logger = slavelog.New(slavelog.Options{
+		File:        logFile,
+		Term:        os.Stderr,
+		TermEnabled: !isTUI,
+		TermColor:   slavelog.TermColorEnabled(os.Stderr),
+	})
 
-	if patch, ok, err := loadAutoCompactionPatchFromConfig(*configPath); err != nil {
+	monitor := slavelog.NewRunMonitor(rt.Coordinator, logger)
+	go monitor.Run(ctx)
+
+	autoCompactionPatch, autoCompactionOK, err := loadAutoCompactionPatchFromConfig(*configPath)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "warning:", err)
-	} else if ok {
-		ag.AutoCompaction = patch.ApplyTo(ag.AutoCompaction)
+		autoCompactionOK = false
 	}
 
 	runner := &headlessSlaveRunner{
 		Coord: rt.Coordinator,
-		Agent: ag,
+		Log:   logger,
+		Mon:   monitor,
+		NewAgent: func() (*agent.Agent, error) {
+			a, err := agent.New(rt.Client, rt.Registry, resolvedSkillsDir)
+			if err != nil {
+				return nil, err
+			}
+			a.SetPromptMode(agent.PromptModeChat)
+			a.SetChatToolMode(agent.ChatToolModeDispatcher)
+			a.Temperature = float32(*temperature)
+			a.RestartManager = rt.Restart
+			if autoCompactionOK {
+				a.AutoCompaction = autoCompactionPatch.ApplyTo(a.AutoCompaction)
+			}
+			return a, nil
+		},
+	}
+	if _, err := runner.NewAgent(); err != nil {
+		closeRuntime()
+		return err
 	}
 
 	meta := buildSlaveMeta(*tags)
+	kindAndFormat := func(format string) (slavelog.Kind, string) {
+		trimmed := strings.TrimSpace(format)
+		lower := strings.ToLower(trimmed)
+		switch {
+		case strings.HasPrefix(lower, "cmd:"):
+			return slavelog.KindCmd, strings.TrimSpace(trimmed[len("cmd:"):])
+		case strings.HasPrefix(lower, "ws:"):
+			return slavelog.KindWS, strings.TrimSpace(trimmed[len("ws:"):])
+		case strings.HasPrefix(lower, "warn:"):
+			return slavelog.KindWarn, strings.TrimSpace(trimmed[len("warn:"):])
+		case strings.HasPrefix(lower, "error:"):
+			return slavelog.KindError, strings.TrimSpace(trimmed[len("error:"):])
+		default:
+			return slavelog.KindWS, trimmed
+		}
+	}
 	client, err := cluster.NewSlaveClient(cluster.SlaveClientOptions{
 		MasterURL:          *masterURL,
 		Secret:             secretBytes,
@@ -434,16 +506,129 @@ func runSlave(args []string) error {
 		InsecureSkipVerify: cCfg.TLS.InsecureSkipVerify || *insecureSkipVerify,
 		Runner:             runner,
 		MaxInflightRuns:    *maxInflight,
+		StopRequested: func() bool {
+			return rt.Restart != nil && rt.Restart.IsRestartRequested()
+		},
 		Logf: func(format string, args ...any) {
-			fmt.Fprintf(os.Stderr, format+"\n", args...)
+			if logger == nil {
+				fmt.Fprintf(os.Stderr, strings.TrimRight(format, "\n")+"\n", args...)
+				return
+			}
+			kind, cleaned := kindAndFormat(format)
+			logger.Logf(kind, cleaned, args...)
 		},
 	})
 	if err != nil {
+		closeRuntime()
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "%s slave starting. master=%s id=%s name=%s\n", appinfo.Display(), strings.TrimSpace(*masterURL), strings.TrimSpace(client.SlaveID()), strings.TrimSpace(*name))
-	return client.Run(context.Background())
+	if logger != nil {
+		logger.Logf(
+			slavelog.KindInfo,
+			"%s slave starting. master=%s id=%s name=%s ui=%s heartbeat=%s max_inflight_runs=%d log=%s",
+			appinfo.Display(),
+			strings.TrimSpace(*masterURL),
+			strings.TrimSpace(client.SlaveID()),
+			strings.TrimSpace(*name),
+			uiRaw,
+			heartbeat.String(),
+			*maxInflight,
+			logPath,
+		)
+	}
+	if isTUI {
+		if logger != nil {
+			logger.Logf(slavelog.KindInfo, "starting TUI (slave continues running in background)")
+		}
+		tuiAgent, err := runner.NewAgent()
+		if err != nil {
+			closeRuntime()
+			return err
+		}
+
+		clientErrCh := make(chan error, 1)
+		tuiErrCh := make(chan error, 1)
+
+		go func() { clientErrCh <- client.Run(ctx) }()
+		go func() {
+			tuiErrCh <- tuiAgent.RunInteractiveTUI(ctx, os.Stdin, os.Stdout, agent.TUIOptions{
+				Coordinator: rt.Coordinator,
+				ConfigPath:  *configPath,
+			})
+		}()
+
+		var (
+			runErr error
+			tuiErr error
+		)
+		select {
+		case runErr = <-clientErrCh:
+			cancel()
+			select {
+			case tuiErr = <-tuiErrCh:
+			case <-time.After(2 * time.Second):
+			}
+		case tuiErr = <-tuiErrCh:
+			cancel()
+			select {
+			case runErr = <-clientErrCh:
+			case <-time.After(2 * time.Second):
+				runErr = context.Canceled
+			}
+		}
+		if tuiErr != nil && logger != nil {
+			logger.Logf(slavelog.KindWarn, "tui exited: %v", tuiErr)
+		}
+		if errors.Is(runErr, context.Canceled) {
+			runErr = nil
+		}
+		if errors.Is(runErr, cluster.ErrStopRequested) {
+			runErr = nil
+		}
+		if rt.Restart != nil && rt.Restart.IsRestartRequested() {
+			closeRuntime()
+
+			if supervisor.IsSupervisedChild() {
+				os.Exit(restart.ExitCodeRestartRequested)
+			}
+
+			if execErr := restart.ExecReplacement("", os.Args[1:]); execErr != nil {
+				if _, spawnErr := restart.SpawnReplacement("", os.Args[1:]); spawnErr != nil {
+					return joinErrors(execErr, spawnErr)
+				}
+				os.Exit(0)
+			}
+			return nil
+		}
+
+		closeRuntime()
+		return runErr
+	}
+
+	runErr := client.Run(ctx)
+	if errors.Is(runErr, cluster.ErrStopRequested) {
+		runErr = nil
+	}
+
+	if rt.Restart != nil && rt.Restart.IsRestartRequested() {
+		closeRuntime()
+
+		if supervisor.IsSupervisedChild() {
+			os.Exit(restart.ExitCodeRestartRequested)
+		}
+
+		if execErr := restart.ExecReplacement("", os.Args[1:]); execErr != nil {
+			if _, spawnErr := restart.SpawnReplacement("", os.Args[1:]); spawnErr != nil {
+				return joinErrors(execErr, spawnErr)
+			}
+			os.Exit(0)
+		}
+		return nil
+	}
+
+	closeRuntime()
+	return runErr
 }
 
 type clusterSlaveProvider struct {
@@ -468,13 +653,21 @@ func (p clusterSlaveProvider) SnapshotSlaves() []agent.SlaveSummary {
 }
 
 type headlessSlaveRunner struct {
-	Coord *multiagent.Coordinator
-	Agent *agent.Agent
+	Coord    *multiagent.Coordinator
+	NewAgent func() (*agent.Agent, error)
+	Log      *slavelog.Logger
+	Mon      *slavelog.RunMonitor
 }
 
 func (r *headlessSlaveRunner) Run(ctx context.Context, task string, opts cluster.AgentRunOptions, metadata map[string]any) (string, string, error) {
-	if r == nil || r.Coord == nil || r.Agent == nil {
+	if r == nil || r.Coord == nil || r.NewAgent == nil {
 		return "", "", errors.New("runner is not configured")
+	}
+	requestID := ""
+	if metadata != nil {
+		if v, ok := metadata["request_id"].(string); ok {
+			requestID = strings.TrimSpace(v)
+		}
 	}
 	runMeta := map[string]any{
 		"source": "cluster_slave",
@@ -486,7 +679,85 @@ func (r *headlessSlaveRunner) Run(ctx context.Context, task string, opts cluster
 	if err != nil {
 		return "", "", err
 	}
-	out, err := r.Agent.RunHeadlessSession(ctx, run.ID, task, nil)
+	if r.Mon != nil {
+		r.Mon.AddRun(run.ID)
+	}
+	ag, err := r.NewAgent()
+	if err != nil {
+		return "", "", err
+	}
+	if r.Log != nil {
+		r.Log.Logf(
+			slavelog.KindCmd,
+			"agent_run begin request_id=%s run_id=%s max_turns=%d temperature=%v max_tokens=%d timeout_seconds=%d task=%s",
+			requestID,
+			run.ID,
+			opts.MaxTurns,
+			opts.Temperature,
+			opts.MaxTokens,
+			opts.TimeoutSeconds,
+			slavelog.Preview(task, 240),
+		)
+	}
+	toolNameByCallID := make(map[string]string)
+	out, err := ag.RunHeadlessSessionWithHooks(ctx, run.ID, task, nil, agent.HeadlessSessionHooks{
+		Emit: func(msg llm.Message) {
+			if r.Log == nil {
+				return
+			}
+			switch msg.Role {
+			case "assistant":
+				if len(msg.ToolCalls) == 0 {
+					if strings.TrimSpace(msg.Content) != "" {
+						r.Log.Logf(
+							slavelog.KindInfo,
+							"agent_run assistant request_id=%s run_id=%s msg=%s",
+							requestID,
+							run.ID,
+							slavelog.Preview(msg.Content, 320),
+						)
+					}
+					return
+				}
+				for _, call := range msg.ToolCalls {
+					toolNameByCallID[call.ID] = call.Function.Name
+					r.Log.Logf(
+						slavelog.KindTool,
+						"agent_run tool_start request_id=%s run_id=%s call_id=%s name=%s args=%s",
+						requestID,
+						run.ID,
+						strings.TrimSpace(call.ID),
+						strings.TrimSpace(call.Function.Name),
+						slavelog.Preview(call.Function.Arguments, 320),
+					)
+				}
+			case "tool":
+				name := strings.TrimSpace(toolNameByCallID[msg.ToolCallID])
+				kind := slavelog.KindResult
+				if strings.HasPrefix(strings.TrimSpace(msg.Content), "ERROR:") {
+					kind = slavelog.KindWarn
+				}
+				r.Log.Logf(
+					kind,
+					"agent_run tool_done request_id=%s run_id=%s call_id=%s name=%s result=%s",
+					requestID,
+					run.ID,
+					strings.TrimSpace(msg.ToolCallID),
+					name,
+					slavelog.Preview(msg.Content, 320),
+				)
+			default:
+				return
+			}
+		},
+	})
+	if r.Log != nil {
+		if err != nil {
+			r.Log.Logf(slavelog.KindWarn, "agent_run done request_id=%s run_id=%s error=%s", requestID, run.ID, slavelog.Preview(err.Error(), 320))
+		} else {
+			r.Log.Logf(slavelog.KindInfo, "agent_run done request_id=%s run_id=%s output=%s", requestID, run.ID, slavelog.Preview(out, 320))
+		}
+	}
 	return out, run.ID, err
 }
 

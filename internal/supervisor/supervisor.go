@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +21,7 @@ const (
 	// EnvSupervisorPID is informational only (helps debugging).
 	EnvSupervisorPID = "XINGHEBOT_SUPERVISOR_PID"
 
-	// EnvDisableSupervisor disables auto-supervision for interactive chat.
+	// EnvDisableSupervisor disables auto-supervision.
 	EnvDisableSupervisor = "XINGHEBOT_NO_SUPERVISOR"
 )
 
@@ -55,6 +56,10 @@ func RunForegroundLoop(args []string) (int, error) {
 		EnvSupervisorPID+"="+strconv.Itoa(os.Getpid()),
 	)
 
+	sigCh := make(chan os.Signal, 4)
+	signal.Notify(sigCh, supervisorSignals()...)
+	defer signal.Stop(sigCh)
+
 	restarts := 0
 	for {
 		cmd := exec.Command(exe, args...)
@@ -64,16 +69,51 @@ func RunForegroundLoop(args []string) (int, error) {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
-		runErr := cmd.Run()
-		code, err := exitCode(runErr)
-		if err != nil {
+		if err := cmd.Start(); err != nil {
 			return 1, err
 		}
+		waitCh := make(chan error, 1)
+		go func() { waitCh <- cmd.Wait() }()
 
-		if code != restart.ExitCodeRestartRequested {
-			return code, nil
+		shutdown := false
+		killCh := (<-chan time.Time)(nil)
+		var killTimer *time.Timer
+
+		for {
+			select {
+			case sig := <-sigCh:
+				shutdown = true
+				if cmd.Process != nil {
+					_ = cmd.Process.Signal(sig)
+				}
+				if killTimer == nil {
+					killTimer = time.NewTimer(8 * time.Second)
+					killCh = killTimer.C
+				}
+			case <-killCh:
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				killCh = nil
+			case runErr := <-waitCh:
+				if killTimer != nil {
+					killTimer.Stop()
+				}
+				code, err := exitCode(runErr)
+				if err != nil {
+					return 1, err
+				}
+				if shutdown {
+					return code, nil
+				}
+				if code != restart.ExitCodeRestartRequested {
+					return code, nil
+				}
+				goto scheduleRestart
+			}
 		}
 
+	scheduleRestart:
 		restarts++
 		if restarts > 25 {
 			return 1, fmt.Errorf("too many restarts (%d)", restarts)
