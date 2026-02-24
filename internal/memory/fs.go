@@ -339,7 +339,11 @@ func listMemoryFiles(root string) []string {
 	}
 
 	for _, dir := range []string{"daily", "sessions"} {
-		entries, err := os.ReadDir(filepath.Join(root, dir))
+		subdir := filepath.Join(root, dir)
+		if info, err := os.Lstat(subdir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		entries, err := os.ReadDir(subdir)
 		if err != nil {
 			continue
 		}
@@ -351,7 +355,7 @@ func listMemoryFiles(root string) []string {
 			if !strings.HasSuffix(strings.ToLower(name), ".md") {
 				continue
 			}
-			p := filepath.Join(root, dir, name)
+			p := filepath.Join(subdir, name)
 			if ent.Type()&os.ModeSymlink != 0 {
 				continue
 			}

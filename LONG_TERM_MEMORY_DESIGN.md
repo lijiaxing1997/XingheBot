@@ -4,6 +4,8 @@
 > 更新时间：2026-02-24  
 > 参考实现：OpenClaw `memory-core`（磁盘为 source of truth + 可重建索引 + `memory_search`/`memory_get` 召回工具）
 
+> 备注（当前实现）：本仓库已落地 Phase 1/2 的 **scan 后端**（扫描 `MEMORY.md`/`daily/*.md`/`sessions/*.md`），以保持 `CGO_ENABLED=0` 的交叉编译体验；SQLite/向量索引（含 sqlite-vec）作为 Phase 3 方案暂缓。
+
 ## 0. 背景与目标
 
 我们希望在 **不同会话 / 不同 run** 之间，让 Agent 能“记住”并稳定召回：
@@ -217,7 +219,7 @@ OpenClaw 在 SQLite 内通过加载 `sqlite-vec` 扩展创建 `vec0` 虚拟表�
     }
   ],
   "disabled": false,
-  "backend": "sqlite_hybrid",
+  "backend": "scan",
   "root": "~/.xinghebot/workspace/<project_key>/memory"
 }
 ```
@@ -321,7 +323,7 @@ OpenClaw 在 SQLite 内通过加载 `sqlite-vec` 扩展创建 `vec0` 虚拟表�
     // 可选覆盖：直接指定最终 memory 根目录（优先级高于 workspace_dir/project_key）
     "root_dir": "",
 
-    "backend": "sqlite_hybrid",      // sqlite_hybrid | sqlite_fts | scan
+    "backend": "scan",              // scan (当前实现) | sqlite_hybrid | sqlite_fts（未来扩展）
 
     // SQLite index（派生物；可删可重建）
     "db_path": "",                   // default: "<memory_root>/index/memory.sqlite"
@@ -402,4 +404,4 @@ MVP 建议口径：
 2) 写入权限：primary（dispatcher）与 worker/slave 均允许 `memory_append/flush` 写入  
 3) 自动化：自动 flush（compaction）与自动 capture（新 session）默认开启（无需确认，但必须强制脱敏/过滤/限额）  
 4) 索引口径：不直接索引 `history.jsonl`，只索引生成后的 `sessions/*.md`（以及 `MEMORY.md`/`daily/*.md`）  
-5) 数据库/向量：默认 `sqlite_hybrid`（SQLite FTS5 + embeddings 向量检索；优先 sqlite-vec，不可用自动降级到 sqlite_fts/scan；不依赖独立向量数据库服务）
+5) 数据库/向量：MVP 默认 `scan`（仅扫描 Markdown，保证 `CGO_ENABLED=0` 交叉编译便捷性）；后续可升级到 `sqlite_hybrid`（SQLite FTS5 + embeddings；优先 sqlite-vec，不可用自动降级到 sqlite_fts/scan）

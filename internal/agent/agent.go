@@ -400,12 +400,43 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 		reqMessages = append(reqMessages, history...)
 		reqMessages = append(reqMessages, turnHistory...)
 
+		didAutoFlush := false
 		for {
 			resp, sentMessages, err := chatWithAutoCompaction(ctx, a.Client, llm.ChatRequest{
 				Messages:    reqMessages,
 				Tools:       toolDefs,
 				Temperature: a.Temperature,
-			}, a.AutoCompaction, nil)
+			}, a.AutoCompaction, func(summary llm.Message) {
+				if didAutoFlush {
+					return
+				}
+				didAutoFlush = true
+				if a.PromptMode != PromptModeChat || a.Tools == nil {
+					return
+				}
+				rawArgs, err := json.Marshal(map[string]any{
+					"text":   summary.Content,
+					"source": "plain",
+					"auto":   true,
+				})
+				if err != nil {
+					return
+				}
+				result, flushErr := a.Tools.Call(ctx, "memory_flush", rawArgs)
+				if flushErr != nil || strings.TrimSpace(result) == "" {
+					return
+				}
+				var payload struct {
+					Path     string `json:"path"`
+					Appended int    `json:"appended"`
+					Disabled bool   `json:"disabled"`
+				}
+				if json.Unmarshal([]byte(result), &payload) == nil {
+					if !payload.Disabled && payload.Appended > 0 && strings.TrimSpace(payload.Path) != "" {
+						fmt.Fprintf(out, "[System] Long-term memory flush appended %d item(s) to %s.\n", payload.Appended, strings.TrimSpace(payload.Path))
+					}
+				}
+			})
 			if err != nil {
 				return err
 			}

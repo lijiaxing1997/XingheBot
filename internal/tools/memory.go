@@ -74,6 +74,19 @@ func (t *MemorySearchTool) Call(ctx context.Context, args json.RawMessage) (stri
 	if err != nil {
 		return "", err
 	}
+	if in.MinScore != nil && *in.MinScore > 0 && len(resp.Results) > 0 {
+		minScore := *in.MinScore
+		if minScore > 1 {
+			minScore = 1
+		}
+		filtered := resp.Results[:0]
+		for _, r := range resp.Results {
+			if r.Score >= minScore {
+				filtered = append(filtered, r)
+			}
+		}
+		resp.Results = filtered
+	}
 	resp.ProjectKey = paths.ProjectKey
 	out, err := json.Marshal(resp)
 	if err != nil {

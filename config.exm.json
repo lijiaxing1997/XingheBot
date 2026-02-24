@@ -29,7 +29,7 @@
     "workspace_dir": "~/.xinghebot/workspace",
     "project_key": "",
     "root_dir": "",
-    "backend": "sqlite_hybrid",
+    "backend": "scan",
     "auto_flush_on_compaction": true,
     "auto_capture_on_new_session": true,
     "index_history_jsonl": false,

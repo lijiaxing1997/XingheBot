@@ -94,3 +94,31 @@ func TestSearchSkipsSymlinks(t *testing.T) {
 		t.Fatalf("expected Get to reject symlink")
 	}
 }
+
+func TestSearchSkipsSymlinkDirectories(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test skipped on windows")
+	}
+	root := t.TempDir()
+	cfg := DefaultConfig().WithDefaults()
+
+	outsideDir := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideDir, "2026-02-24.md"), []byte("outside marker"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := os.Symlink(outsideDir, filepath.Join(root, "daily")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	resp, err := Search(context.Background(), cfg, root, "outside marker", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(resp.Results) != 0 {
+		t.Fatalf("expected 0 results due to symlink dir, got %d", len(resp.Results))
+	}
+}

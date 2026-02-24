@@ -949,6 +949,19 @@ func (m *tuiModel) ensureEmailSession(subjectKey string) (string, error) {
 		m.cursorLine = -1
 		m.stickToBottom = true
 		m.rerender()
+		if strings.TrimSpace(prevRunID) != "" && strings.TrimSpace(prevRunID) != strings.TrimSpace(run.ID) && m.events != nil {
+			capture := tuiCaptureSessionToMemoryCmd(m.ctx, m.coord, m.gatewayConfigPath, prevRunID)
+			go func() {
+				if capture == nil {
+					return
+				}
+				msg := capture()
+				if msg == nil {
+					return
+				}
+				m.events <- tuiAsyncMsg{Event: msg}
+			}()
+		}
 		return run.ID, nil
 	}
 
@@ -970,6 +983,19 @@ func (m *tuiModel) ensureEmailSession(subjectKey string) (string, error) {
 		m.cursorLine = -1
 		m.stickToBottom = true
 		m.rerender()
+		if strings.TrimSpace(prevRunID) != "" && strings.TrimSpace(prevRunID) != strings.TrimSpace(run.ID) && m.events != nil {
+			capture := tuiCaptureSessionToMemoryCmd(m.ctx, m.coord, m.gatewayConfigPath, prevRunID)
+			go func() {
+				if capture == nil {
+					return
+				}
+				msg := capture()
+				if msg == nil {
+					return
+				}
+				m.events <- tuiAsyncMsg{Event: msg}
+			}()
+		}
 		return run.ID, nil
 	}
 
@@ -1882,11 +1908,9 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.rerender()
 		return true, nil
 	case "shift+up", "alt+up":
-		m.selectSession(-1)
-		return true, nil
+		return true, m.selectSession(-1)
 	case "shift+down", "alt+down":
-		m.selectSession(1)
-		return true, nil
+		return true, m.selectSession(1)
 	case "up":
 		m.moveCursor(-1)
 		return true, nil
@@ -2359,14 +2383,14 @@ func (m *tuiModel) refreshCurrentHistoryFromDisk() {
 	}
 }
 
-func (m *tuiModel) selectSession(delta int) {
+func (m *tuiModel) selectSession(delta int) tea.Cmd {
 	if delta == 0 {
-		return
+		return nil
 	}
 	if len(m.sessions) == 0 {
 		m.sessionCursor = -1
 		m.rerender()
-		return
+		return nil
 	}
 
 	cur := m.sessionCursor
@@ -2383,6 +2407,8 @@ func (m *tuiModel) selectSession(delta int) {
 	next := nextPos - 1
 	m.sessionCursor = next
 
+	var capture tea.Cmd
+	prevRunID := m.currentRunID()
 	if next >= 0 {
 		if next != m.sessionIndex {
 			m.sessionIndex = next
@@ -2391,9 +2417,13 @@ func (m *tuiModel) selectSession(delta int) {
 			m.refreshAgentIDs()
 			m.cursorLine = -1
 			m.stickToBottom = true
+			if strings.TrimSpace(prevRunID) != "" && strings.TrimSpace(prevRunID) != strings.TrimSpace(m.currentRunID()) {
+				capture = tuiCaptureSessionToMemoryCmd(m.ctx, m.coord, m.gatewayConfigPath, prevRunID)
+			}
 		}
 	}
 	m.rerender()
+	return capture
 }
 
 func (m *tuiModel) moveCursor(delta int) {

@@ -54,7 +54,7 @@ type configFile struct {
 func DefaultConfig() Config {
 	return Config{
 		WorkspaceDir:       "~/.xinghebot/workspace",
-		Backend:            "sqlite_hybrid",
+		Backend:            "scan",
 		MaxResults:         10,
 		HybridVectorWeight: 0.7,
 		HybridTextWeight:   0.3,
