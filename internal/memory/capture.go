@@ -14,10 +14,13 @@ import (
 )
 
 type CaptureResponse struct {
-	Path     string `json:"path"`
-	Messages int    `json:"messages"`
-	Disabled bool   `json:"disabled"`
-	Root     string `json:"root"`
+	Path          string `json:"path"`
+	Messages      int    `json:"messages"`
+	Disabled      bool   `json:"disabled"`
+	Root          string `json:"root"`
+	FlushPath     string `json:"flush_path,omitempty"`
+	FlushAppended int    `json:"flush_appended,omitempty"`
+	FlushError    string `json:"flush_error,omitempty"`
 }
 
 type historyMessage struct {
@@ -62,6 +65,8 @@ func CaptureSessionFromHistory(ctx context.Context, cfg Config, root string, run
 		return CaptureResponse{}, err
 	}
 	defer f.Close()
+
+	historyInfo, _ := f.Stat()
 
 	transcript := make([]historyMessage, 0, minInt(maxMessages, 64))
 	compactionSummary := ""
@@ -171,6 +176,30 @@ func CaptureSessionFromHistory(ctx context.Context, cfg Config, root string, run
 	}
 	resp.Path = cleanRel
 	resp.Messages = len(transcript)
+
+	if cfg.AutoFlushOnSessionCapture != nil && !*cfg.AutoFlushOnSessionCapture {
+		return resp, nil
+	}
+
+	flushText := buildCaptureFlushText(compactionSummary, transcript)
+	if strings.TrimSpace(flushText) == "" {
+		return resp, nil
+	}
+
+	if historyInfo != nil && shouldSkipCaptureFlush(root, id, historyInfo.Size(), historyInfo.ModTime()) {
+		return resp, nil
+	}
+
+	flushResp, err := FlushFromText(ctx, cfg, root, flushText, 12, id, now)
+	if err != nil {
+		resp.FlushError = err.Error()
+		return resp, nil
+	}
+	resp.FlushPath = strings.TrimSpace(flushResp.Path)
+	resp.FlushAppended = flushResp.Appended
+	if historyInfo != nil {
+		_ = writeCaptureFlushMarker(root, id, historyInfo.Size(), historyInfo.ModTime())
+	}
 	return resp, nil
 }
 
@@ -184,6 +213,94 @@ func extractSummarySection(text string) string {
 		return strings.TrimSpace(raw[idx+len(marker):])
 	}
 	return raw
+}
+
+type captureFlushMarker struct {
+	Size    int64  `json:"size"`
+	ModTime string `json:"mod_time"`
+}
+
+func captureFlushMarkerPath(root string, runID string) string {
+	key := sanitizeKey(runID)
+	if key == "" {
+		key = "run"
+	}
+	return filepath.Join(root, "index", ".session_capture_flush."+key+".json")
+}
+
+func shouldSkipCaptureFlush(root string, runID string, size int64, modTime time.Time) bool {
+	if size < 0 {
+		return false
+	}
+	path := captureFlushMarkerPath(root, runID)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var marker captureFlushMarker
+	if err := json.Unmarshal(data, &marker); err != nil {
+		return false
+	}
+	if marker.Size != size {
+		return false
+	}
+	prev, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(marker.ModTime))
+	if err != nil {
+		return false
+	}
+	return prev.UTC().Equal(modTime.UTC())
+}
+
+func writeCaptureFlushMarker(root string, runID string, size int64, modTime time.Time) error {
+	if size < 0 {
+		size = 0
+	}
+	path := captureFlushMarkerPath(root, runID)
+	marker := captureFlushMarker{
+		Size:    size,
+		ModTime: modTime.UTC().Format(time.RFC3339Nano),
+	}
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(path, data, 0o644)
+}
+
+func buildCaptureFlushText(compactionSummary string, transcript []historyMessage) string {
+	add := func(lines *[]string, text string) {
+		t := strings.TrimSpace(text)
+		if t == "" {
+			return
+		}
+		t = strings.TrimPrefix(t, "-")
+		t = strings.TrimPrefix(t, "*")
+		t = strings.TrimPrefix(t, "•")
+		t = strings.TrimSpace(t)
+		if t == "" {
+			return
+		}
+		if isLikelyPromptInjection(t) {
+			return
+		}
+		kind, _ := classifyDurableLine(t)
+		if strings.TrimSpace(kind) == "" || kind == "note" {
+			return
+		}
+		*lines = append(*lines, t)
+	}
+
+	lines := make([]string, 0, 24)
+	for _, line := range strings.Split(compactionSummary, "\n") {
+		add(&lines, line)
+	}
+	for _, msg := range transcript {
+		add(&lines, msg.Content)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
 }
 
 func writeFileAtomic(path string, content []byte, perm os.FileMode) error {

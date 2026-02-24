@@ -166,9 +166,12 @@ type tuiSessionCreatedMsg struct {
 }
 
 type tuiSessionCapturedMsg struct {
-	RunID string
-	Path  string
-	Err   error
+	RunID         string
+	Path          string
+	FlushPath     string
+	FlushAppended int
+	FlushError    string
+	Err           error
 }
 
 type tuiSessionDeletedMsg struct {
@@ -464,7 +467,13 @@ func tuiCaptureSessionToMemoryCmd(ctx context.Context, coord *multiagent.Coordin
 		if err != nil {
 			return tuiSessionCapturedMsg{RunID: id, Err: err}
 		}
-		return tuiSessionCapturedMsg{RunID: id, Path: strings.TrimSpace(out.Path)}
+		return tuiSessionCapturedMsg{
+			RunID:         id,
+			Path:          strings.TrimSpace(out.Path),
+			FlushPath:     strings.TrimSpace(out.FlushPath),
+			FlushAppended: out.FlushAppended,
+			FlushError:    strings.TrimSpace(out.FlushError),
+		}
 	}
 }
 
@@ -577,13 +586,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tuiSessionCapturedMsg:
-		if msg.Err != nil {
-			m.notice = msg.Err.Error()
-			return m, nil
-		}
-		if strings.TrimSpace(msg.Path) != "" {
-			m.notice = "Captured previous session to long-term memory: " + strings.TrimSpace(msg.Path)
-		}
+		m.applySessionCaptureResult(msg)
+		m.rerender()
 		return m, nil
 	case tuiSessionDeletedMsg:
 		if msg.Err != nil {
@@ -1423,7 +1427,9 @@ func (m *tuiModel) runTurnEmail(taskCtx context.Context, runID string, userText 
 	baseHistory = append(baseHistory, emailAttachPolicy)
 
 	afterTool := func(call llm.ToolCall, result string, callErr error) []llm.Message {
-		return m.maybeBuildWaitCompletionSystemMessages(runID, call, result, callErr)
+		msgs := m.maybeBuildWaitCompletionSystemMessages(runID, call, result, callErr)
+		msgs = append(msgs, m.maybeBuildMemoryFlushSystemMessages(call, result, callErr)...)
+		return msgs
 	}
 	err := runTUITurnStreaming(ctx, agentRef, runID, userTextForLLM, baseHistory, emit, afterTool)
 	if err != nil {
@@ -1631,6 +1637,34 @@ func (m *tuiModel) maybeBuildWaitCompletionSystemMessages(runID string, call llm
 	return []llm.Message{{Role: "system", Content: content}}
 }
 
+func (m *tuiModel) maybeBuildMemoryFlushSystemMessages(call llm.ToolCall, result string, callErr error) []llm.Message {
+	if callErr != nil {
+		return nil
+	}
+	if strings.TrimSpace(call.Function.Name) != "memory_flush" {
+		return nil
+	}
+	raw := strings.TrimSpace(result)
+	if raw == "" || !json.Valid([]byte(raw)) {
+		return nil
+	}
+	var out struct {
+		Path     string `json:"path"`
+		Appended int    `json:"appended"`
+		Disabled bool   `json:"disabled"`
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	path := strings.TrimSpace(out.Path)
+	if out.Disabled || out.Appended <= 0 || path == "" {
+		return nil
+	}
+	content := "[System Message] Long-term memory flush completed: appended " +
+		fmt.Sprintf("%d", out.Appended) + " item(s) to " + path + "."
+	return []llm.Message{{Role: "system", Content: content}}
+}
+
 type autoFollowupEmailReply struct {
 	To      string
 	Subject string
@@ -1815,9 +1849,7 @@ func (m *tuiModel) handleAsyncEvent(evt tea.Msg) {
 	case tuiSetNoticeMsg:
 		m.notice = strings.TrimSpace(msg.Text)
 	case tuiSessionCapturedMsg:
-		if msg.Err != nil {
-			m.notice = strings.TrimSpace(msg.Err.Error())
-		}
+		m.applySessionCaptureResult(msg)
 	case tuiRunManifestUpdatedMsg:
 		if msg.Err != nil {
 			m.notice = strings.TrimSpace(msg.Err.Error())
@@ -1842,6 +1874,45 @@ func (m *tuiModel) handleAsyncEvent(evt tea.Msg) {
 		m.gatewayInbox = append(m.gatewayInbox, msg.Msg)
 		m.maybeProcessGatewayInbox()
 	default:
+	}
+}
+
+func (m *tuiModel) applySessionCaptureResult(msg tuiSessionCapturedMsg) {
+	if msg.Err != nil {
+		m.notice = strings.TrimSpace(msg.Err.Error())
+		return
+	}
+	if errText := strings.TrimSpace(msg.FlushError); errText != "" {
+		m.notice = "Long-term memory flush after session capture failed: " + errText
+	}
+	if capturePath := strings.TrimSpace(msg.Path); capturePath != "" {
+		m.notice = "Captured previous session to long-term memory: " + capturePath
+	}
+	if msg.FlushAppended <= 0 {
+		return
+	}
+	flushPath := strings.TrimSpace(msg.FlushPath)
+	if flushPath == "" {
+		return
+	}
+	runID := strings.TrimSpace(m.currentRunID())
+	if runID == "" {
+		return
+	}
+	m.ensureSessionLoaded(runID)
+	sess := m.sessionData[runID]
+	if sess == nil {
+		return
+	}
+	sys := llm.Message{
+		Role: "system",
+		Content: "[System Message] Long-term memory flush completed after session capture: appended " +
+			fmt.Sprintf("%d", msg.FlushAppended) + " item(s) to " + flushPath + ".",
+	}
+	sess.History = append(sess.History, sys)
+	_ = appendJSONL(sess.HistoryPath, sys)
+	if runID == m.currentRunID() && m.stickToBottom {
+		m.cursorLine = -1
 	}
 }
 
@@ -2592,7 +2663,9 @@ func (m *tuiModel) runTurn(taskCtx context.Context, runID string, userText strin
 	}
 
 	afterTool := func(call llm.ToolCall, result string, callErr error) []llm.Message {
-		return m.maybeBuildWaitCompletionSystemMessages(runID, call, result, callErr)
+		msgs := m.maybeBuildWaitCompletionSystemMessages(runID, call, result, callErr)
+		msgs = append(msgs, m.maybeBuildMemoryFlushSystemMessages(call, result, callErr)...)
+		return msgs
 	}
 	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit, afterTool); err != nil {
 		if errors.Is(err, context.Canceled) {

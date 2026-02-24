@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"test_skill_agent/internal/bootstrap"
+	"test_skill_agent/internal/memory"
 )
 
 func runInit(role string, configPath string, mcpConfigPath string, skillsDir string) error {
@@ -47,6 +48,37 @@ func runInit(role string, configPath string, mcpConfigPath string, skillsDir str
 	printStatus("reply_style", filepath.Join(filepath.Dir(report.ConfigPath), "reply_style.md"))
 	printStatus("mcp", report.MCPConfigPath)
 	fmt.Fprintf(os.Stdout, "skills: %s\n", strings.TrimSpace(report.SkillsDir))
+
+	memStatus := "skipped"
+	memPath := ""
+	if cfg, cfgErr := memory.LoadConfig(report.ConfigPath); cfgErr == nil {
+		if cfg.Enabled == nil || *cfg.Enabled {
+			cwd, _ := os.Getwd()
+			if paths, err := memory.ResolvePaths(cfg, cwd); err == nil {
+				memPath = filepath.Join(paths.RootDir, "MEMORY.md")
+				_, statErr := os.Stat(memPath)
+				hadTemplate := statErr == nil
+				if err := memory.EnsureLayout(paths.RootDir); err == nil {
+					if hadTemplate {
+						memStatus = "exists"
+					} else {
+						memStatus = "created"
+					}
+				} else {
+					memStatus = "error: " + err.Error()
+				}
+			} else {
+				memStatus = "error: " + err.Error()
+			}
+		}
+	} else if cfgErr != nil {
+		memStatus = "error: " + cfgErr.Error()
+	}
+	if strings.TrimSpace(memPath) != "" {
+		fmt.Fprintf(os.Stdout, "memory: %s (%s)\n", memPath, memStatus)
+	} else {
+		fmt.Fprintf(os.Stdout, "memory: (%s)\n", memStatus)
+	}
 
 	wantSkills := []string{"skill-creator", "skill-installer", "mcp-builder", "mcp-config-manager", "ssh-deploy-slave"}
 	found := make([]string, 0, len(wantSkills))

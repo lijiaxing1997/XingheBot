@@ -38,9 +38,10 @@ type Config struct {
 
 	Embeddings EmbeddingsConfig `json:"embeddings"`
 
-	AutoFlushOnCompaction   *bool `json:"auto_flush_on_compaction"`
-	AutoCaptureOnNewSession *bool `json:"auto_capture_on_new_session"`
-	IndexHistoryJSONL       *bool `json:"index_history_jsonl"`
+	AutoFlushOnCompaction     *bool `json:"auto_flush_on_compaction"`
+	AutoCaptureOnNewSession   *bool `json:"auto_capture_on_new_session"`
+	AutoFlushOnSessionCapture *bool `json:"auto_flush_on_session_capture"`
+	IndexHistoryJSONL         *bool `json:"index_history_jsonl"`
 
 	MaxResults int `json:"max_results"`
 
@@ -103,6 +104,10 @@ func (c Config) WithDefaults() Config {
 	if out.AutoCaptureOnNewSession == nil {
 		v := true
 		out.AutoCaptureOnNewSession = &v
+	}
+	if out.AutoFlushOnSessionCapture == nil {
+		v := true
+		out.AutoFlushOnSessionCapture = &v
 	}
 	if out.IndexHistoryJSONL == nil {
 		v := false
