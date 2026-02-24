@@ -11,6 +11,31 @@ import (
 	"test_skill_agent/internal/llm"
 )
 
+func normalizeClusterFilesRelPath(raw string) string {
+	p := strings.TrimSpace(raw)
+	p = strings.Trim(p, `"'`)
+	if p == "" {
+		return ""
+	}
+
+	// Normalize separators for cross-platform inputs (Windows paths, etc.).
+	p = strings.ReplaceAll(p, "\\", "/")
+	p = strings.TrimPrefix(p, "./")
+
+	// Users/models sometimes include the root dir prefix or an absolute path.
+	// remote_file_get expects a path relative to cluster.files.root_dir, so strip the common ".cluster/files" prefix.
+	if idx := strings.LastIndex(p, "/.cluster/files/"); idx >= 0 {
+		return strings.TrimPrefix(p[idx+len("/.cluster/files/"):], "/")
+	}
+	if idx := strings.LastIndex(p, ".cluster/files/"); idx >= 0 {
+		return strings.TrimPrefix(p[idx+len(".cluster/files/"):], "/")
+	}
+	if strings.HasPrefix(p, ".cluster/files/") {
+		return strings.TrimPrefix(p, ".cluster/files/")
+	}
+	return p
+}
+
 type RemoteFilePutTool struct {
 	Gateway *cluster.MasterGateway
 }
@@ -106,7 +131,7 @@ func (t *RemoteFileGetTool) Definition() llm.ToolDefinition {
 		Type: "function",
 		Function: llm.ToolFunctionDef{
 			Name:        "remote_file_get",
-			Description: "Fetch a file from a slave (remote_path is relative to the slave's cluster.files.root_dir). The file is saved under the master's cluster.files.root_dir inbox.",
+			Description: "Fetch a file from a slave. remote_path MUST be relative to the slave's cluster.files.root_dir (default: .cluster/files). Use paths like outbox/report.txt (NOT .cluster/files/outbox/report.txt or an absolute path). The file is saved under the master's cluster.files.root_dir inbox.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -129,7 +154,7 @@ func (t *RemoteFileGetTool) Call(ctx context.Context, args json.RawMessage) (str
 		return "", err
 	}
 	slaveID := strings.TrimSpace(in.Slave)
-	remotePath := strings.TrimSpace(in.RemotePath)
+	remotePath := normalizeClusterFilesRelPath(in.RemotePath)
 	if slaveID == "" || remotePath == "" {
 		return "", errors.New("slave and remote_path are required")
 	}

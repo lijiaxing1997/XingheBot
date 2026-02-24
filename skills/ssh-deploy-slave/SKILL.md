@@ -88,13 +88,14 @@ Slave 节点必须有自己的 LLM 配置（至少包含 `model_config.api_key/b
 
 ### 可选（推荐）：Skills（让 Slave 具备“自我进化”能力）
 
-一般不需要手动同步 skills：远端执行过 `--init` 后已释放以下五个（推荐的最小集合）：
+一般不需要手动同步 skills：远端执行过 `--init` 后已释放以下六个（推荐的最小集合）：
 
 - `skills/skill-installer`
 - `skills/skill-creator`
 - `skills/mcp-builder`
 - `skills/mcp-config-manager`
 - `skills/ssh-deploy-slave`
+- `skills/slave-file-manager`
 
 建议部署到远端：
 

@@ -117,6 +117,7 @@ func buildBundle(root string) ([]byte, error) {
 		"mcp-builder",
 		"mcp-config-manager",
 		"ssh-deploy-slave",
+		"slave-file-manager",
 	}
 	for _, s := range skills {
 		src := filepath.Join(root, "skills", s)

@@ -300,7 +300,8 @@ func (t *RemoteAgentRunTool) Definition() llm.ToolDefinition {
 			Description: "Run a task on a connected slave agent via WebSocket. " +
 				"In interactive sessions this tool is NON-BLOCKING: it spawns a sub-agent to run remotely and returns immediately. " +
 				"Use agent_wait/agent_result (or TAB in the TUI) to monitor and retrieve the final output. " +
-				"Outside a session context it runs synchronously and returns the final result.",
+				"Outside a session context it runs synchronously and returns the final result. " +
+				"For original/binary files, prefer remote_file_get/remote_file_put (do NOT ask the slave to paste file contents).",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

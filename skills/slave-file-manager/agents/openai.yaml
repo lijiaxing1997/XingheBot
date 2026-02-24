@@ -1,0 +1,4 @@
+interface:
+  display_name: "Slave File Manager"
+  short_description: "Transfer slave files and prepare attachments"
+  default_prompt: "Use $slave-file-manager to fetch original files from a slave and attach them with correct paths."

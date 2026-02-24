@@ -1140,6 +1140,48 @@ func (m *tuiModel) resolveEmailAttachments(paths []string) ([]gateway.EmailAttac
 		return nil, nil
 	}
 
+	stripRelPathPrefix := func(p string, prefix string) (string, bool) {
+		pp := filepath.Clean(strings.TrimSpace(prefix))
+		if pp == "" || pp == "." || filepath.IsAbs(pp) {
+			return p, false
+		}
+		clean := filepath.Clean(p)
+		sep := string(os.PathSeparator)
+		if clean == pp {
+			return "", true
+		}
+		if strings.HasPrefix(clean, pp+sep) {
+			return strings.TrimPrefix(clean, pp+sep), true
+		}
+		return p, false
+	}
+
+	normalizeAttachPath := func(p string, rootDir string) string {
+		clean := strings.TrimSpace(p)
+		clean = strings.Trim(clean, `"'`)
+		if clean == "" {
+			return ""
+		}
+		// Accept Windows-style separators in user/model output.
+		clean = strings.ReplaceAll(clean, "\\", string(os.PathSeparator))
+		clean = filepath.Clean(clean)
+
+		// The attach directive expects paths relative to cluster.files.root_dir.
+		// If the model mistakenly prefixes the root dir (e.g. ".cluster/files/outbox/x.txt"),
+		// strip it so we don't end up with "<root>/.cluster/files/...".
+		prefixes := []string{strings.TrimSpace(rootDir), ".cluster/files"}
+		for _, prefix := range prefixes {
+			for {
+				stripped, ok := stripRelPathPrefix(clean, prefix)
+				if !ok {
+					break
+				}
+				clean = stripped
+			}
+		}
+		return clean
+	}
+
 	rootDir := ".cluster/files"
 	cfgPath := strings.TrimSpace(m.gatewayConfigPath)
 	if cfgPath != "" {
@@ -1166,7 +1208,7 @@ func (m *tuiModel) resolveEmailAttachments(paths []string) ([]gateway.EmailAttac
 			break
 		}
 		trimmed := strings.TrimSpace(p)
-		trimmed = strings.Trim(trimmed, `"'`)
+		trimmed = normalizeAttachPath(trimmed, rootDir)
 		if trimmed == "" {
 			continue
 		}
@@ -1285,7 +1327,7 @@ func (m *tuiModel) runTurnEmail(taskCtx context.Context, runID string, userText 
 			"To attach files, include one or more lines in your FINAL reply like:",
 			"- ATTACH: outbox/report.txt",
 			"- 附件: outbox/report.txt",
-			"Paths must be under cluster.files.root_dir (default: .cluster/files). Use the outbox/ subdirectory when possible.",
+			"Attachment paths must be RELATIVE to cluster.files.root_dir (default: .cluster/files). Do NOT prefix \".cluster/files/\" (wrong: \".cluster/files/outbox/report.txt\"). Prefer outbox/ when possible.",
 		}, "\n"),
 	}
 	baseHistory = append(baseHistory, emailAttachPolicy)
