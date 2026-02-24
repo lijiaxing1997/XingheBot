@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -479,6 +480,22 @@ func runSlave(args []string) error {
 	}
 
 	meta := buildSlaveMeta(*tags)
+
+	if strings.TrimSpace(*slaveID) == "" {
+		idPath := defaultStableSlaveIDPath()
+		id, generated, err := loadOrCreateStableSlaveID(idPath)
+		if err != nil {
+			if logger != nil {
+				logger.Logf(slavelog.KindWarn, "stable slave id unavailable (path=%s): %v", idPath, err)
+			}
+		} else {
+			*slaveID = id
+			if generated && logger != nil {
+				logger.Logf(slavelog.KindInfo, "stable slave id generated: %s (saved to %s)", strings.TrimSpace(id), idPath)
+			}
+		}
+	}
+
 	kindAndFormat := func(format string) (slavelog.Kind, string) {
 		trimmed := strings.TrimSpace(format)
 		lower := strings.ToLower(trimmed)
@@ -661,6 +678,60 @@ type headlessSlaveRunner struct {
 	Mon      *slavelog.RunMonitor
 }
 
+const (
+	headlessPrimaryAgentID      = "primary"
+	headlessPrimaryHistoryFile  = "history.jsonl"
+	headlessPrimaryAgentTask    = "primary chat session"
+	headlessMaxRunTitleRunes    = 60
+	headlessMaxHistoryLineBytes = 1024 * 1024
+)
+
+func oneLine(text string) string {
+	s := strings.TrimSpace(text)
+	if s == "" {
+		return ""
+	}
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	return s
+}
+
+func remoteRunTitle(task string) string {
+	s := oneLine(task)
+	if s == "" {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) > headlessMaxRunTitleRunes {
+		s = string(r[:headlessMaxRunTitleRunes]) + "…"
+	}
+	return "remote: " + s
+}
+
+func appendJSONLLine(path string, payload any) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if len(data) > headlessMaxHistoryLineBytes {
+		return fmt.Errorf("jsonl payload too large: %d bytes", len(data))
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(data, '\n'))
+	return err
+}
+
 func (r *headlessSlaveRunner) Run(ctx context.Context, task string, opts cluster.AgentRunOptions, metadata map[string]any) (string, string, error) {
 	if r == nil || r.Coord == nil || r.NewAgent == nil {
 		return "", "", errors.New("runner is not configured")
@@ -677,6 +748,9 @@ func (r *headlessSlaveRunner) Run(ctx context.Context, task string, opts cluster
 	for k, v := range metadata {
 		runMeta[k] = v
 	}
+	if title := remoteRunTitle(task); title != "" {
+		runMeta["title"] = title
+	}
 	run, err := r.Coord.CreateRun("", runMeta)
 	if err != nil {
 		return "", "", err
@@ -684,6 +758,37 @@ func (r *headlessSlaveRunner) Run(ctx context.Context, task string, opts cluster
 	if r.Mon != nil {
 		r.Mon.AddRun(run.ID)
 	}
+
+	if _, _, createErr := r.Coord.CreateAgent(run.ID, multiagent.AgentSpec{
+		ID:   headlessPrimaryAgentID,
+		Task: headlessPrimaryAgentTask,
+		Metadata: map[string]any{
+			"type":   "primary",
+			"source": "cluster_slave",
+		},
+	}); createErr != nil && !strings.Contains(strings.ToLower(createErr.Error()), "already exists") {
+		// best-effort: keep running even if the agent dir cannot be created
+		if r.Log != nil {
+			r.Log.Logf(slavelog.KindWarn, "agent_run warn request_id=%s run_id=%s create_primary_agent=%v", requestID, run.ID, createErr)
+		}
+	}
+	primaryAgentDir := r.Coord.AgentDir(run.ID, headlessPrimaryAgentID)
+	historyPath := filepath.Join(primaryAgentDir, headlessPrimaryHistoryFile)
+
+	if state, stErr := r.Coord.ReadAgentState(run.ID, headlessPrimaryAgentID); stErr == nil {
+		now := time.Now().UTC()
+		state.Status = multiagent.StatusRunning
+		state.PID = os.Getpid()
+		if state.StartedAt.IsZero() {
+			state.StartedAt = now
+		}
+		state.UpdatedAt = now
+		_ = r.Coord.UpdateAgentState(run.ID, state)
+	}
+
+	// Persist the task so the slave TUI can display remote runs.
+	_ = appendJSONLLine(historyPath, llm.Message{Role: "user", Content: strings.TrimSpace(task)})
+
 	ag, err := r.NewAgent()
 	if err != nil {
 		return "", "", err
@@ -704,6 +809,7 @@ func (r *headlessSlaveRunner) Run(ctx context.Context, task string, opts cluster
 	toolNameByCallID := make(map[string]string)
 	out, err := ag.RunHeadlessSessionWithHooks(ctx, run.ID, task, nil, agent.HeadlessSessionHooks{
 		Emit: func(msg llm.Message) {
+			_ = appendJSONLLine(historyPath, msg)
 			if r.Log == nil {
 				return
 			}
@@ -760,6 +866,29 @@ func (r *headlessSlaveRunner) Run(ctx context.Context, task string, opts cluster
 			r.Log.Logf(slavelog.KindInfo, "agent_run done request_id=%s run_id=%s output=%s", requestID, run.ID, slavelog.Preview(out, 320))
 		}
 	}
+
+	finished := time.Now().UTC()
+	status := multiagent.StatusCompleted
+	errText := ""
+	if err != nil {
+		status = multiagent.StatusFailed
+		errText = err.Error()
+	}
+	if state, stErr := r.Coord.ReadAgentState(run.ID, headlessPrimaryAgentID); stErr == nil {
+		state.Status = status
+		state.Error = errText
+		state.FinishedAt = finished
+		state.UpdatedAt = finished
+		_ = r.Coord.UpdateAgentState(run.ID, state)
+	}
+	_ = r.Coord.WriteResult(run.ID, headlessPrimaryAgentID, multiagent.AgentResult{
+		RunID:      run.ID,
+		AgentID:    headlessPrimaryAgentID,
+		Status:     status,
+		Output:     out,
+		Error:      errText,
+		FinishedAt: finished,
+	})
 	return out, run.ID, err
 }
 
@@ -812,4 +941,47 @@ func parseTagMap(raw string) map[string]string {
 		return nil
 	}
 	return out
+}
+
+func defaultStableSlaveIDPath() string {
+	base, err := os.UserConfigDir()
+	if err != nil || strings.TrimSpace(base) == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || strings.TrimSpace(home) == "" {
+			return "slave_id"
+		}
+		return filepath.Join(home, ".xinghebot", "slave_id")
+	}
+	return filepath.Join(base, appinfo.Name, "slave_id")
+}
+
+func loadOrCreateStableSlaveID(path string) (id string, generated bool, err error) {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return "", false, errors.New("stable slave id path is empty")
+	}
+
+	if data, err := os.ReadFile(p); err == nil {
+		if v := strings.TrimSpace(string(data)); v != "" {
+			return v, false, nil
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", false, err
+	}
+
+	id = cluster.NewID("slave")
+	dir := filepath.Dir(p)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return id, true, err
+	}
+	tmp := filepath.Join(dir, fmt.Sprintf(".slave_id.tmp.%d", time.Now().UTC().UnixNano()))
+	if err := os.WriteFile(tmp, []byte(id+"\n"), 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return id, true, err
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp)
+		return id, true, err
+	}
+	return id, true, nil
 }

@@ -3,13 +3,19 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net"
 	"net/smtp"
+	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -35,6 +41,12 @@ type EmailThreadContext struct {
 	MessageID  string
 	InReplyTo  string
 	References []string
+}
+
+type EmailAttachment struct {
+	Path        string
+	Name        string
+	ContentType string
 }
 
 type EmailInbound struct {
@@ -492,6 +504,16 @@ func (g *EmailGateway) markSeen(c *client.Client, seqNum uint32) error {
 }
 
 func (g *EmailGateway) SendReply(ctx context.Context, to string, subject string, body string, thread EmailThreadContext) error {
+	return g.SendReplyWithAttachments(ctx, to, subject, body, thread, nil)
+}
+
+const (
+	maxEmailAttachments      = 5
+	maxEmailAttachmentBytes  = 20 << 20
+	maxEmailAttachmentsBytes = 25 << 20
+)
+
+func (g *EmailGateway) SendReplyWithAttachments(ctx context.Context, to string, subject string, body string, thread EmailThreadContext, attachments []EmailAttachment) error {
 	if g == nil {
 		return errors.New("email gateway is nil")
 	}
@@ -550,7 +572,18 @@ func (g *EmailGateway) SendReply(ctx context.Context, to string, subject string,
 		baseRefs = append(baseRefs, canonicalMessageID(thread.InReplyTo))
 	}
 	threadRefs := buildReferencesForReply(baseRefs, threadInReplyTo)
-	msg := buildTextEmail(from, to, subjectEncoded, body, threadInReplyTo, threadRefs)
+
+	attachments = normalizeEmailAttachments(attachments)
+	msg := ""
+	if len(attachments) == 0 {
+		msg = buildTextEmail(from, to, subjectEncoded, body, threadInReplyTo, threadRefs)
+	} else {
+		encoded, err := buildMixedEmail(from, to, subjectEncoded, body, threadInReplyTo, threadRefs, attachments)
+		if err != nil {
+			return err
+		}
+		msg = encoded
+	}
 	if _, err := w.Write([]byte(msg)); err != nil {
 		return fmt.Errorf("smtp write failed: %w", err)
 	}
@@ -585,6 +618,175 @@ func buildTextEmail(from string, to string, subject string, body string, inReply
 		"Date: "+time.Now().Format(time.RFC1123Z),
 	)
 	return strings.Join(headers, "\r\n") + "\r\n\r\n" + body + "\r\n"
+}
+
+func normalizeEmailAttachments(list []EmailAttachment) []EmailAttachment {
+	out := make([]EmailAttachment, 0, len(list))
+	seen := make(map[string]bool, len(list))
+	var total int64
+	for _, att := range list {
+		p := strings.TrimSpace(att.Path)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		info, err := os.Stat(p)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if info.Size() <= 0 {
+			continue
+		}
+		if len(out) >= maxEmailAttachments {
+			break
+		}
+		if info.Size() > maxEmailAttachmentBytes {
+			continue
+		}
+		if total+info.Size() > maxEmailAttachmentsBytes {
+			break
+		}
+		total += info.Size()
+
+		name := strings.TrimSpace(att.Name)
+		if name == "" {
+			name = filepath.Base(p)
+		}
+		ct := strings.TrimSpace(att.ContentType)
+		if ct == "" {
+			ct = mime.TypeByExtension(strings.ToLower(filepath.Ext(name)))
+		}
+		if strings.TrimSpace(ct) == "" {
+			ct = "application/octet-stream"
+		}
+		out = append(out, EmailAttachment{
+			Path:        p,
+			Name:        name,
+			ContentType: ct,
+		})
+	}
+	return out
+}
+
+func buildMixedEmail(from string, to string, subject string, body string, inReplyTo string, references []string, attachments []EmailAttachment) (string, error) {
+	if strings.TrimSpace(body) == "" {
+		body = "(empty)"
+	}
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\n", "\r\n")
+
+	boundary := randomBoundary("mix")
+
+	headers := []string{
+		"From: " + from,
+		"To: " + to,
+		"Subject: " + subject,
+	}
+	if v := formatMessageID(inReplyTo); v != "" {
+		headers = append(headers, "In-Reply-To: "+v)
+	}
+	if refs := formatReferencesHeaderValue(references); refs != "" {
+		headers = append(headers, "References: "+refs)
+	}
+	headers = append(headers,
+		"MIME-Version: 1.0",
+		fmt.Sprintf("Content-Type: multipart/mixed; boundary=\"%s\"", boundary),
+		"Date: "+time.Now().Format(time.RFC1123Z),
+	)
+
+	var b strings.Builder
+	b.Grow(2048)
+	b.WriteString(strings.Join(headers, "\r\n"))
+	b.WriteString("\r\n\r\n")
+
+	// Body part
+	b.WriteString("--" + boundary + "\r\n")
+	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
+	b.WriteString(body)
+	b.WriteString("\r\n")
+
+	for _, att := range attachments {
+		data, err := os.ReadFile(att.Path)
+		if err != nil {
+			return "", fmt.Errorf("read attachment %s: %w", strings.TrimSpace(att.Path), err)
+		}
+		filename := strings.TrimSpace(att.Name)
+		if filename == "" {
+			filename = filepath.Base(att.Path)
+		}
+		ct := strings.TrimSpace(att.ContentType)
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		ascii, escaped := encodeFilenameParams(filename)
+
+		b.WriteString("--" + boundary + "\r\n")
+		b.WriteString(fmt.Sprintf("Content-Type: %s; name=\"%s\"; name*=UTF-8''%s\r\n", ct, ascii, escaped))
+		b.WriteString("Content-Transfer-Encoding: base64\r\n")
+		b.WriteString(fmt.Sprintf("Content-Disposition: attachment; filename=\"%s\"; filename*=UTF-8''%s\r\n\r\n", ascii, escaped))
+		b.WriteString(encodeBase64MIME(data))
+	}
+
+	b.WriteString("--" + boundary + "--\r\n")
+	return b.String(), nil
+}
+
+func encodeBase64MIME(data []byte) string {
+	if len(data) == 0 {
+		return "\r\n"
+	}
+	encoded := base64.StdEncoding.EncodeToString(data)
+	var b strings.Builder
+	b.Grow(len(encoded) + (len(encoded)/76+2)*2)
+	for i := 0; i < len(encoded); i += 76 {
+		end := i + 76
+		if end > len(encoded) {
+			end = len(encoded)
+		}
+		b.WriteString(encoded[i:end])
+		b.WriteString("\r\n")
+	}
+	return b.String()
+}
+
+func encodeFilenameParams(filename string) (ascii string, escaped string) {
+	name := strings.TrimSpace(filename)
+	if name == "" {
+		name = "file"
+	}
+	escaped = url.PathEscape(name)
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.' || r == '_' || r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	ascii = strings.Trim(b.String(), "._-")
+	if ascii == "" {
+		ascii = "file"
+	}
+	return ascii, escaped
+}
+
+func randomBoundary(prefix string) string {
+	var b [12]byte
+	_, _ = rand.Read(b[:])
+	suffix := hex.EncodeToString(b[:])
+	p := strings.TrimSpace(prefix)
+	if p == "" {
+		return suffix
+	}
+	return p + "-" + suffix
 }
 
 var messageIDAngleRe = regexp.MustCompile(`<([^>]+)>`)

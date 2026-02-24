@@ -23,6 +23,7 @@ import (
 	"golang.org/x/term"
 
 	"test_skill_agent/internal/appinfo"
+	"test_skill_agent/internal/cluster"
 	"test_skill_agent/internal/gateway"
 	"test_skill_agent/internal/llm"
 	"test_skill_agent/internal/multiagent"
@@ -94,13 +95,15 @@ type tuiModel struct {
 	width  int
 	height int
 
+	lastRunsReloadAt time.Time
+
 	gatewayConfigPath string
 	emailGateway      *gateway.EmailGateway
 	gatewayEnabled    bool
 	gatewayEmail      string
 	gatewayStatus     gateway.EmailStatus
 	gatewayInbox      []gateway.EmailInbound
-	startGatewayOnce  sync.Once
+	startGatewayOnce  *sync.Once
 
 	sessions      []multiagent.RunManifest
 	sessionIndex  int
@@ -138,6 +141,8 @@ type tuiSessionData struct {
 	RunID       string
 	HistoryPath string
 	History     []llm.Message
+	HistoryMod  time.Time
+	HistorySize int64
 }
 
 type tuiInitMsg struct{}
@@ -251,6 +256,7 @@ func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator, c
 		emailGateway:      emailGateway,
 		gatewayEnabled:    enabled,
 		gatewayEmail:      emailAddr,
+		startGatewayOnce:  &sync.Once{},
 	}
 }
 
@@ -309,6 +315,9 @@ func (m tuiModel) Init() tea.Cmd {
 func (m *tuiModel) startGateway() {
 	if m == nil {
 		return
+	}
+	if m.startGatewayOnce == nil {
+		m.startGatewayOnce = &sync.Once{}
 	}
 	m.startGatewayOnce.Do(func() {
 		if !m.gatewayEnabled || m.emailGateway == nil {
@@ -443,6 +452,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(tuiSpinnerFrames) > 0 {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(tuiSpinnerFrames)
 		}
+		m.maybeReloadRuns()
+		m.refreshCurrentHistoryFromDisk()
 		m.refreshSlaves()
 		m.refreshAgentIDs()
 		m.maybeAutoFollowup()
@@ -997,6 +1008,186 @@ func trimQuotedReplyBody(body string) string {
 	return text
 }
 
+const (
+	emailMaxAttachments      = 5
+	emailMaxAttachmentBytes  = 20 << 20
+	emailMaxAttachmentsBytes = 25 << 20
+)
+
+func extractEmailAttachmentDirectives(text string) (clean string, paths []string) {
+	raw := strings.ReplaceAll(text, "\r\n", "\n")
+	lines := strings.Split(raw, "\n")
+
+	seen := make(map[string]bool, 8)
+	addPath := func(p string) {
+		p = strings.TrimSpace(p)
+		p = strings.Trim(p, `"'`)
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		paths = append(paths, p)
+	}
+
+	outLines := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+
+		rest := ""
+		switch {
+		case strings.HasPrefix(lower, "attach:"):
+			rest = strings.TrimSpace(trimmed[len("attach:"):])
+		case strings.HasPrefix(lower, "attachment:"):
+			rest = strings.TrimSpace(trimmed[len("attachment:"):])
+		case strings.HasPrefix(lower, "attachments:"):
+			rest = strings.TrimSpace(trimmed[len("attachments:"):])
+		case strings.HasPrefix(trimmed, "附件:"):
+			rest = strings.TrimSpace(strings.TrimPrefix(trimmed, "附件:"))
+		case strings.HasPrefix(trimmed, "附件："):
+			rest = strings.TrimSpace(strings.TrimPrefix(trimmed, "附件："))
+		default:
+			outLines = append(outLines, line)
+			continue
+		}
+
+		if rest == "" {
+			continue
+		}
+		parts := strings.FieldsFunc(rest, func(r rune) bool {
+			switch r {
+			case ',', '，', ';', '；':
+				return true
+			default:
+				return false
+			}
+		})
+		if len(parts) == 0 {
+			addPath(rest)
+			continue
+		}
+		for _, p := range parts {
+			addPath(p)
+		}
+	}
+
+	clean = strings.TrimSpace(strings.Join(outLines, "\n"))
+	return clean, paths
+}
+
+func (m *tuiModel) resolveEmailAttachments(paths []string) ([]gateway.EmailAttachment, []string) {
+	if m == nil {
+		return nil, nil
+	}
+
+	rootDir := ".cluster/files"
+	cfgPath := strings.TrimSpace(m.gatewayConfigPath)
+	if cfgPath != "" {
+		if cCfg, err := cluster.LoadClusterConfig(cfgPath); err == nil {
+			if v := strings.TrimSpace(cCfg.Files.RootDir); v != "" {
+				rootDir = v
+			}
+		}
+	}
+	absRoot, err := filepath.Abs(rootDir)
+	if err != nil {
+		absRoot = rootDir
+	}
+	absRoot = filepath.Clean(absRoot)
+
+	out := make([]gateway.EmailAttachment, 0, min(emailMaxAttachments, len(paths)))
+	warnings := make([]string, 0, 4)
+	seen := make(map[string]bool, len(paths))
+	var total int64
+
+	for _, p := range paths {
+		if len(out) >= emailMaxAttachments {
+			warnings = append(warnings, "- too many attachments requested; extras ignored")
+			break
+		}
+		trimmed := strings.TrimSpace(p)
+		trimmed = strings.Trim(trimmed, `"'`)
+		if trimmed == "" {
+			continue
+		}
+
+		candidate := trimmed
+		if !filepath.IsAbs(candidate) {
+			candidate = filepath.Join(absRoot, candidate)
+		}
+		abs, err := filepath.Abs(candidate)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("- attach %q: resolve failed: %v", trimmed, err))
+			continue
+		}
+		abs = filepath.Clean(abs)
+		if seen[abs] {
+			continue
+		}
+		seen[abs] = true
+
+		rel, err := filepath.Rel(absRoot, abs)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			warnings = append(warnings, fmt.Sprintf("- attach %q: not under %s", trimmed, absRoot))
+			continue
+		}
+
+		info, err := os.Stat(abs)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("- attach %q: %v", trimmed, err))
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			warnings = append(warnings, fmt.Sprintf("- attach %q: not a file", trimmed))
+			continue
+		}
+		if info.Size() > emailMaxAttachmentBytes {
+			warnings = append(warnings, fmt.Sprintf("- attach %q: too large (%d bytes)", trimmed, info.Size()))
+			continue
+		}
+		if total+info.Size() > emailMaxAttachmentsBytes {
+			warnings = append(warnings, "- attachments too large in total; extras ignored")
+			break
+		}
+		total += info.Size()
+
+		out = append(out, gateway.EmailAttachment{
+			Path: abs,
+			Name: filepath.Base(abs),
+		})
+	}
+
+	return out, warnings
+}
+
+func (m *tuiModel) sendGatewayEmailReply(ctx context.Context, to string, subject string, body string, thread gateway.EmailThreadContext) error {
+	if m == nil || m.emailGateway == nil {
+		return errors.New("email gateway is not configured")
+	}
+
+	cleanBody, rawPaths := extractEmailAttachmentDirectives(body)
+	atts, warnings := m.resolveEmailAttachments(rawPaths)
+	if len(warnings) > 0 {
+		if strings.TrimSpace(cleanBody) != "" {
+			cleanBody += "\n\n"
+		}
+		cleanBody += "Attachment notes:\n" + strings.Join(warnings, "\n")
+	}
+
+	if len(atts) == 0 {
+		return m.emailGateway.SendReply(ctx, to, subject, cleanBody, thread)
+	}
+	if err := m.emailGateway.SendReplyWithAttachments(ctx, to, subject, cleanBody, thread, atts); err != nil {
+		fallback := cleanBody
+		if strings.TrimSpace(fallback) != "" {
+			fallback += "\n\n"
+		}
+		fallback += "Attachment send failed: " + err.Error()
+		return m.emailGateway.SendReply(ctx, to, subject, fallback, thread)
+	}
+	return nil
+}
+
 func (m *tuiModel) runTurnEmail(runID string, userText string, baseHistory []llm.Message, replySubject string, replyTo string, thread gateway.EmailThreadContext) {
 	events := m.events
 	agentRef := m.agent
@@ -1027,6 +1218,18 @@ func (m *tuiModel) runTurnEmail(runID string, userText string, baseHistory []llm
 		userTextForLLM += "\n\n等待完成后告诉我最终结果。"
 	}
 
+	emailAttachPolicy := llm.Message{
+		Role: "system",
+		Content: strings.Join([]string{
+			"Email channel: you can send file attachments.",
+			"To attach files, include one or more lines in your FINAL reply like:",
+			"- ATTACH: outbox/report.txt",
+			"- 附件: outbox/report.txt",
+			"Paths must be under cluster.files.root_dir (default: .cluster/files). Use the outbox/ subdirectory when possible.",
+		}, "\n"),
+	}
+	baseHistory = append(baseHistory, emailAttachPolicy)
+
 	afterTool := func(call llm.ToolCall, result string, callErr error) []llm.Message {
 		return m.maybeBuildWaitCompletionSystemMessages(runID, call, result, callErr)
 	}
@@ -1053,7 +1256,7 @@ func (m *tuiModel) runTurnEmail(runID string, userText string, baseHistory []llm
 
 	replyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := gw.SendReply(replyCtx, replyTo, replySubject, finalText, thread); err != nil {
+	if err := m.sendGatewayEmailReply(replyCtx, replyTo, replySubject, finalText, thread); err != nil {
 		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
 	}
 }
@@ -1362,7 +1565,7 @@ func (m *tuiModel) runAutoFollowup(runID string, baseHistory []llm.Message, emai
 	}
 	replyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := gw.SendReply(replyCtx, emailReply.To, emailReply.Subject, finalText, emailReply.Thread); err != nil {
+	if err := m.sendGatewayEmailReply(replyCtx, emailReply.To, emailReply.Subject, finalText, emailReply.Thread); err != nil {
 		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
 	}
 }
@@ -1697,10 +1900,18 @@ func (m *tuiModel) ensureSessionLoaded(runID string) {
 	historyPath := filepath.Join(agentDir, tuiHistoryFileName)
 	history, _ := readJSONL[llm.Message](historyPath, 2000)
 	history = sanitizeToolCallHistory(history)
+	var mod time.Time
+	var size int64
+	if info, err := os.Stat(historyPath); err == nil {
+		mod = info.ModTime()
+		size = info.Size()
+	}
 	m.sessionData[runID] = &tuiSessionData{
 		RunID:       runID,
 		HistoryPath: historyPath,
 		History:     history,
+		HistoryMod:  mod,
+		HistorySize: size,
 	}
 }
 
@@ -1827,6 +2038,100 @@ func (m *tuiModel) refreshSlaves() {
 		return slaves[i].SlaveID < slaves[j].SlaveID
 	})
 	m.slaves = slaves
+}
+
+const tuiRunsReloadInterval = 1 * time.Second
+
+func (m *tuiModel) maybeReloadRuns() {
+	if m == nil || m.coord == nil {
+		return
+	}
+	// In slave mode, new runs can arrive asynchronously via master-dispatched tasks.
+	if m.slaveProvider != nil {
+		return
+	}
+	now := time.Now().UTC()
+	if !m.lastRunsReloadAt.IsZero() && now.Sub(m.lastRunsReloadAt) < tuiRunsReloadInterval {
+		return
+	}
+	m.lastRunsReloadAt = now
+
+	runs, err := m.coord.ListRuns()
+	if err != nil {
+		return
+	}
+	if len(runs) == 0 {
+		return
+	}
+
+	activeID := strings.TrimSpace(m.currentRunID())
+	cursorIsNew := m.sessionCursor == -1
+	cursorID := ""
+	if !cursorIsNew && m.sessionCursor >= 0 && m.sessionCursor < len(m.sessions) {
+		cursorID = strings.TrimSpace(m.sessions[m.sessionCursor].ID)
+	}
+
+	m.sessions = runs
+
+	nextActive := 0
+	if activeID != "" {
+		for i := range m.sessions {
+			if strings.TrimSpace(m.sessions[i].ID) == activeID {
+				nextActive = i
+				break
+			}
+		}
+	}
+	m.sessionIndex = nextActive
+
+	if cursorIsNew {
+		m.sessionCursor = -1
+		return
+	}
+	nextCursor := nextActive
+	if cursorID != "" {
+		for i := range m.sessions {
+			if strings.TrimSpace(m.sessions[i].ID) == cursorID {
+				nextCursor = i
+				break
+			}
+		}
+	}
+	m.sessionCursor = nextCursor
+}
+
+func (m *tuiModel) refreshCurrentHistoryFromDisk() {
+	if m == nil || m.coord == nil {
+		return
+	}
+	// Only needed in slave mode: history can be appended by background runs.
+	if m.slaveProvider != nil {
+		return
+	}
+	runID := strings.TrimSpace(m.currentRunID())
+	if runID == "" {
+		return
+	}
+	m.ensureSessionLoaded(runID)
+	sess := m.sessionData[runID]
+	if sess == nil {
+		return
+	}
+	info, err := os.Stat(sess.HistoryPath)
+	if err != nil {
+		return
+	}
+	if info.ModTime().Equal(sess.HistoryMod) && info.Size() == sess.HistorySize {
+		return
+	}
+	history, _ := readJSONL[llm.Message](sess.HistoryPath, 2000)
+	history = sanitizeToolCallHistory(history)
+	sess.History = history
+	sess.HistoryMod = info.ModTime()
+	sess.HistorySize = info.Size()
+	if runID == m.currentRunID() && m.stickToBottom {
+		m.cursorLine = -1
+	}
 }
 
 func (m *tuiModel) selectSession(delta int) {
@@ -3026,6 +3331,17 @@ func (m *tuiModel) renderSlavesLines(width int, height int) []string {
 
 	onlineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	if m.slaveProvider == nil {
+		lines = append(lines, truncateANSI(mutedStyle.Render("(slave mode)"), width-1))
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		if len(lines) > height {
+			lines = lines[:height]
+		}
+		return lines
+	}
 
 	online := make([]SlaveSummary, 0, len(m.slaves))
 	offline := make([]SlaveSummary, 0, len(m.slaves))
