@@ -54,6 +54,31 @@ func (r *agentRuntime) Close() error {
 
 func main() {
 	args := os.Args[1:]
+	if len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "help") {
+		if len(args) < 2 || isHelpArg(args[1]) {
+			printRootUsage(os.Stdout)
+			return
+		}
+		switch strings.ToLower(strings.TrimSpace(args[1])) {
+		case "chat":
+			printChatUsage(os.Stdout)
+		case "master":
+			printMasterUsage(os.Stdout)
+		case "slave":
+			printSlaveUsage(os.Stdout)
+		case "worker":
+			printWorkerUsage(os.Stdout)
+		case "skills":
+			printSkillsUsage(os.Stdout)
+		default:
+			printRootUsage(os.Stdout)
+		}
+		return
+	}
+	if len(args) > 0 && isHelpArg(args[0]) {
+		printRootUsage(os.Stdout)
+		return
+	}
 	if shouldAutoSuperviseChat(args) {
 		code, err := supervisor.RunForegroundLoop(args)
 		if err != nil {
@@ -115,6 +140,9 @@ func shouldAutoSuperviseChat(args []string) bool {
 	if hasInitFlag(args) {
 		return false
 	}
+	if hasHelpFlag(args) {
+		return false
+	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return false
 	}
@@ -146,8 +174,27 @@ func hasInitFlag(args []string) bool {
 	return false
 }
 
+func hasHelpFlag(args []string) bool {
+	for _, a := range args {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		switch a {
+		case "-h", "--help", "-help":
+			return true
+		}
+		if strings.HasPrefix(a, "--help=") || strings.HasPrefix(a, "-help=") {
+			return true
+		}
+	}
+	return false
+}
+
 func runChat(args []string) error {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
+	fs.SetOutput(os.Stdout)
+	fs.Usage = func() { printChatUsage(fs.Output()) }
 	skillsDir := fs.String("skills-dir", defaultSkillsDir(), "skills directory")
 	temperature := fs.Float64("temperature", 0.2, "LLM temperature")
 	maxTokens := fs.Int("max-tokens", 0, "max tokens for completion (overrides config)")
@@ -259,6 +306,8 @@ func runChat(args []string) error {
 
 func runWorker(args []string) error {
 	fs := flag.NewFlagSet("worker", flag.ExitOnError)
+	fs.SetOutput(os.Stdout)
+	fs.Usage = func() { printWorkerUsage(fs.Output()) }
 	skillsDir := fs.String("skills-dir", defaultSkillsDir(), "skills directory")
 	temperature := fs.Float64("temperature", 0.2, "default worker temperature")
 	maxTokens := fs.Int("max-tokens", 0, "default worker max tokens")
@@ -576,8 +625,9 @@ func joinErrors(primary error, secondary error) error {
 }
 
 func runSkills(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: skills <list|create|install>")
+	if len(args) == 0 || isHelpArg(args[0]) {
+		printSkillsUsage(os.Stdout)
+		return nil
 	}
 	switch args[0] {
 	case "list":

@@ -10,6 +10,8 @@ metadata:
 目标：从 Master 机器用 SSH 把 `agent` 以 `slave` 模式部署到远端，并支持后续“更新二进制 / 更新配置 / 更新 skills / 更新 mcp.json / 重启与验证”等日常运维操作。
 
 > 新增：`agent` 二进制支持 `--init`（master/slave/chat 均可用）。部署到远端后可先执行 `agent slave --init` 自动生成配置模板（`slave-config.json`/`mcp.json`）并释放内置 skills（最小集合），从而避免手动同步 skills 目录。
+>
+> 新增：支持在配置里写默认启动参数 `start_params.master` / `start_params.slave`，从而把启动命令缩短为 `agent master` / `agent slave`（大部分参数无需再写在命令行）。
 
 ## 你需要先确认的关键点（必须问清楚）
 
@@ -53,6 +55,26 @@ Slave 节点必须有自己的 LLM 配置（至少包含 `model_config.api_key/b
 - `cluster.secret`：从 Master 的 `config.json` 里复制（Master 启动后会自动生成/写入）
 - `cluster.tls.insecure_skip_verify`：若 Master 用自签 `wss://` 且你允许跳过校验，则设为 `true`
 - `cluster.files`：可选（用于 WS 文件传输落盘目录与配额）
+
+另外建议把 Slave 的默认启动参数写进配置，避免每次命令行写一长串（可按需裁剪）：
+
+```json
+{
+  "start_params": {
+    "slave": {
+      "master": "ws://MASTER_IP:7788/ws",
+      "heartbeat": "5s",
+      "max_inflight_runs": 1,
+      "insecure_skip_verify": false
+    }
+  }
+}
+```
+
+这样远端启动可简化为：
+
+- `agent slave --config slave-config.json --id slave-01 --name build-01`
+- 甚至在 `start_params.slave` 里也配置 `id/name` 后：`agent slave --config slave-config.json`
 
 建议部署到远端：
 
@@ -103,9 +125,10 @@ bash skills/ssh-deploy-slave/scripts/deploy.sh \
   --host 10.0.0.12 --user root --key ~/.ssh/id_ed25519 \
   --remote-dir /opt/agent \
   --config-src ./slave-config.json \
-  --master ws://MASTER_IP:7788/ws \
   --id slave-01 --name build-01 --tags "os=linux,arch=amd64"
 ```
+
+> 如果你的 `slave-config.json` **没有** 配 `start_params.slave.master`，请在脚本里显式传 `--master ws://.../ws`；否则可省略（脚本会从配置读取/校验）。
 
 ### 示例：Windows（OpenSSH Server）
 
@@ -116,7 +139,6 @@ bash skills/ssh-deploy-slave/scripts/deploy.sh \
   --host 10.0.0.99 --user Administrator --key ~/.ssh/id_ed25519 \
   --remote-dir agent \
   --config-src ./slave-config.json \
-  --master ws://MASTER_IP:7788/ws \
   --id win-01 --name win-slave-01 --tags "os=windows,arch=amd64"
 ```
 
@@ -128,7 +150,6 @@ bash skills/ssh-deploy-slave/scripts/deploy.sh \
   --remote-dir /opt/agent \
   --config-src ./slave-config.json \
   --sync-mcp --mcp-src ./mcp.json \
-  --master ws://MASTER_IP:7788/ws \
   --id slave-01 --name build-01
 ```
 

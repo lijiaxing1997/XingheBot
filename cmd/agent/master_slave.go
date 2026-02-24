@@ -21,6 +21,8 @@ import (
 
 func runMaster(args []string) error {
 	fs := flag.NewFlagSet("master", flag.ExitOnError)
+	fs.SetOutput(os.Stdout)
+	fs.Usage = func() { printMasterUsage(fs.Output()) }
 	skillsDir := fs.String("skills-dir", defaultSkillsDir(), "skills directory")
 	temperature := fs.Float64("temperature", 0.2, "LLM temperature")
 	maxTokens := fs.Int("max-tokens", 0, "max tokens for completion (overrides config)")
@@ -39,6 +41,50 @@ func runMaster(args []string) error {
 	resolvedSkillsDir := resolvePath(*skillsDir)
 	if *initFlag {
 		return runInit(*configPath, *mcpConfigPath, resolvedSkillsDir)
+	}
+
+	seen := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) {
+		seen[strings.TrimSpace(f.Name)] = true
+	})
+	if params, ok, err := loadStartParams(*configPath); err != nil {
+		return err
+	} else if ok {
+		if !seen["listen"] && params.Master.Listen != nil {
+			if v := strings.TrimSpace(*params.Master.Listen); v != "" {
+				*listenAddr = v
+			}
+		}
+		if !seen["ws-path"] && params.Master.WSPath != nil {
+			if v := strings.TrimSpace(*params.Master.WSPath); v != "" {
+				*wsPath = v
+			}
+		}
+		if !seen["ui"] && params.Master.UI != nil {
+			if v := strings.TrimSpace(*params.Master.UI); v != "" {
+				*uiMode = v
+			}
+		}
+		if !seen["redis-url"] && params.Master.RedisURL != nil {
+			if v := strings.TrimSpace(*params.Master.RedisURL); v != "" {
+				*redisURL = v
+			}
+		}
+		if !seen["heartbeat"] && params.Master.Heartbeat != nil {
+			raw := strings.TrimSpace(*params.Master.Heartbeat)
+			if raw != "" {
+				d, err := time.ParseDuration(raw)
+				if err != nil {
+					return fmt.Errorf("start_params.master.heartbeat: %w", err)
+				}
+				*heartbeat = d
+			}
+		}
+		if !seen["chat-tool-mode"] && params.Master.ChatToolMode != nil {
+			if v := strings.TrimSpace(*params.Master.ChatToolMode); v != "" {
+				*chatToolMode = v
+			}
+		}
 	}
 	controlPlaneOnly := true
 	if strings.EqualFold(strings.TrimSpace(*chatToolMode), string(agent.ChatToolModeFull)) {
@@ -213,10 +259,12 @@ func runMaster(args []string) error {
 
 func runSlave(args []string) error {
 	fs := flag.NewFlagSet("slave", flag.ExitOnError)
+	fs.SetOutput(os.Stdout)
+	fs.Usage = func() { printSlaveUsage(fs.Output()) }
 	skillsDir := fs.String("skills-dir", defaultSkillsDir(), "skills directory")
 	temperature := fs.Float64("temperature", 0.2, "LLM temperature")
 	maxTokens := fs.Int("max-tokens", 0, "max tokens for completion (overrides config)")
-	configPath := fs.String("config", "config.json", "path to config.json")
+	configPath := fs.String("config", "slave-config.json", "path to config.json")
 	mcpConfigPath := fs.String("mcp-config", "mcp.json", "path to MCP config")
 	multiAgentRoot := fs.String("multi-agent-root", ".multi_agent/runs", "path to multi-agent run storage")
 	masterURL := fs.String("master", "", "master websocket url (ws://... or wss://...)")
@@ -232,6 +280,58 @@ func runSlave(args []string) error {
 	resolvedSkillsDir := resolvePath(*skillsDir)
 	if *initFlag {
 		return runInit(*configPath, *mcpConfigPath, resolvedSkillsDir)
+	}
+
+	seen := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) {
+		seen[strings.TrimSpace(f.Name)] = true
+	})
+	if !seen["config"] && strings.TrimSpace(*configPath) == "slave-config.json" {
+		if _, err := os.Stat("slave-config.json"); err != nil && os.IsNotExist(err) {
+			if _, err := os.Stat("config.json"); err == nil {
+				*configPath = "config.json"
+			}
+		}
+	}
+	if params, ok, err := loadStartParams(*configPath); err != nil {
+		return err
+	} else if ok {
+		if !seen["master"] && params.Slave.MasterURL != nil {
+			if v := strings.TrimSpace(*params.Slave.MasterURL); v != "" {
+				*masterURL = v
+			}
+		}
+		if !seen["name"] && params.Slave.Name != nil {
+			if v := strings.TrimSpace(*params.Slave.Name); v != "" {
+				*name = v
+			}
+		}
+		if !seen["id"] && params.Slave.SlaveID != nil {
+			if v := strings.TrimSpace(*params.Slave.SlaveID); v != "" {
+				*slaveID = v
+			}
+		}
+		if !seen["tags"] && params.Slave.Tags != nil {
+			if v := strings.TrimSpace(*params.Slave.Tags); v != "" {
+				*tags = v
+			}
+		}
+		if !seen["heartbeat"] && params.Slave.Heartbeat != nil {
+			raw := strings.TrimSpace(*params.Slave.Heartbeat)
+			if raw != "" {
+				d, err := time.ParseDuration(raw)
+				if err != nil {
+					return fmt.Errorf("start_params.slave.heartbeat: %w", err)
+				}
+				*heartbeat = d
+			}
+		}
+		if !seen["max-inflight-runs"] && params.Slave.MaxInflightRuns != nil && *params.Slave.MaxInflightRuns > 0 {
+			*maxInflight = *params.Slave.MaxInflightRuns
+		}
+		if !seen["insecure-skip-verify"] && params.Slave.InsecureSkipVerify != nil {
+			*insecureSkipVerify = *params.Slave.InsecureSkipVerify
+		}
 	}
 
 	if strings.TrimSpace(*masterURL) == "" {

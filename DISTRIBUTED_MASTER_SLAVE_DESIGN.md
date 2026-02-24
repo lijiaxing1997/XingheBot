@@ -93,13 +93,10 @@
 ### 2.1 Master
 
 ```bash
-agent master \
-  --config config.json \
-  --ui=tui \
-  --listen 0.0.0.0:7788 \
-  --ws-path /ws \
-  --redis-url redis://127.0.0.1:6379/0
+agent master --config config.json
 ```
+
+> 建议把默认启动参数写进 `config.json`：`start_params.master`（例如 `listen/ws_path/ui/redis_url`），从而避免每次命令行写一长串；命令行参数仍可覆盖配置值。
 
 职责：
 - 启动 TUI + 主 Agent（复用现有 chat 逻辑）
@@ -113,13 +110,12 @@ agent master \
 ```bash
 agent slave \
   --config /path/to/slave-config.json \
-  # TLS 启用时用 wss://，否则用 ws://
-  --master wss://MASTER_IP:7788/ws \
   --name build-linux-amd64 \
   --id slave-01 \
-  --tags "os=linux,arch=amd64,zone=ali-hz" \
-  --heartbeat 5s
+  --tags "os=linux,arch=amd64,zone=ali-hz"
 ```
+
+> 建议把默认启动参数写进 `slave-config.json`：`start_params.slave`（例如 `master/heartbeat/...`）。其中 `start_params.slave.master` 需为 `ws://.../ws` 或 `wss://.../ws`。
 
 职责：
 - 主动连到 Master

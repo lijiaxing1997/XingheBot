@@ -12,7 +12,6 @@ Required:
   --host <host>                 Target host (IP/DNS)
   --user <user>                 SSH user
   --remote-dir <dir>            Remote install dir (Linux: /opt/agent, Windows: C:/opt/agent)
-  --master <ws_url>             Master websocket url (ws://.../ws or wss://.../ws)
 
 SSH:
   --port <port>                 SSH port (default: 22)
@@ -25,9 +24,10 @@ Slave identity:
   --id <slave_id>               Stable slave id (optional)
   --name <name>                 Display name (optional)
   --tags <k=v,k=v>              Comma-separated tags (optional)
-  --heartbeat <duration>        Heartbeat interval (default: 5s)
-  --max-inflight-runs <n>        Max concurrent agent.run (default: 1)
-  --insecure-skip-verify         Skip TLS cert verify for wss:// (dangerous)
+  --master <ws_url>             Master websocket url (required unless set in config start_params.slave.master)
+  --heartbeat <duration>        Override heartbeat interval (optional; else use config/start_params or binary default)
+  --max-inflight-runs <n>        Override max concurrent agent.run (optional; else use config/start_params or binary default)
+  --insecure-skip-verify         Skip TLS cert verify for wss:// (dangerous; optional; else use config/start_params)
 
 Sync options:
   --no-binary                   Do not upload the agent binary
@@ -73,13 +73,16 @@ PORT="22"
 KEY=""
 REMOTE_DIR=""
 MASTER_URL=""
+MASTER_URL_SET="false"
 
 SLAVE_ID=""
 SLAVE_NAME=""
 SLAVE_TAGS=""
-HEARTBEAT="5s"
-MAX_INFLIGHT_RUNS="1"
-INSECURE_SKIP_VERIFY="false"
+HEARTBEAT=""
+HEARTBEAT_SET="false"
+MAX_INFLIGHT_RUNS=""
+MAX_INFLIGHT_RUNS_SET="false"
+INSECURE_SKIP_VERIFY_SET="false"
 
 SYNC_BINARY="true"
 BIN_PATH=""
@@ -109,14 +112,14 @@ while [[ $# -gt 0 ]]; do
     --port) PORT="${2:-}"; shift 2 ;;
     --key) KEY="${2:-}"; shift 2 ;;
     --remote-dir) REMOTE_DIR="${2:-}"; shift 2 ;;
-    --master) MASTER_URL="${2:-}"; shift 2 ;;
+    --master) MASTER_URL="${2:-}"; MASTER_URL_SET="true"; shift 2 ;;
 
     --id) SLAVE_ID="${2:-}"; shift 2 ;;
     --name) SLAVE_NAME="${2:-}"; shift 2 ;;
     --tags) SLAVE_TAGS="${2:-}"; shift 2 ;;
-    --heartbeat) HEARTBEAT="${2:-}"; shift 2 ;;
-    --max-inflight-runs) MAX_INFLIGHT_RUNS="${2:-}"; shift 2 ;;
-    --insecure-skip-verify) INSECURE_SKIP_VERIFY="true"; shift ;;
+    --heartbeat) HEARTBEAT="${2:-}"; HEARTBEAT_SET="true"; shift 2 ;;
+    --max-inflight-runs) MAX_INFLIGHT_RUNS="${2:-}"; MAX_INFLIGHT_RUNS_SET="true"; shift 2 ;;
+    --insecure-skip-verify) INSECURE_SKIP_VERIFY_SET="true"; shift ;;
 
     --no-binary) SYNC_BINARY="false"; shift ;;
     --bin) BIN_PATH="${2:-}"; shift 2 ;;
@@ -147,7 +150,31 @@ done
 [[ -n "${HOST// /}" ]] || die "--host is required"
 [[ -n "${USER// /}" ]] || die "--user is required"
 [[ -n "${REMOTE_DIR// /}" ]] || die "--remote-dir is required"
-[[ -n "${MASTER_URL// /}" ]] || die "--master is required"
+MASTER_URL_FROM_CONFIG_PARSED="false"
+if [[ -z "${MASTER_URL// /}" ]] && [[ -f "${CONFIG_SRC}" ]] && command -v python3 >/dev/null 2>&1; then
+  MASTER_URL_FROM_CONFIG_PARSED="true"
+  MASTER_URL="$(python3 - "${CONFIG_SRC}" <<'PY' || true
+import json
+import sys
+
+path = sys.argv[1]
+try:
+  with open(path, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
+except Exception:
+  sys.exit(0)
+
+sp = cfg.get("start_params") or {}
+slave = sp.get("slave") or {}
+master = slave.get("master") or ""
+if isinstance(master, str):
+  print(master.strip())
+PY
+)"
+fi
+if [[ "${START_SLAVE}" == "true" ]] && [[ "${MASTER_URL_SET}" != "true" ]] && [[ -f "${CONFIG_SRC}" ]] && [[ "${MASTER_URL_FROM_CONFIG_PARSED}" == "true" ]] && [[ -z "${MASTER_URL// /}" ]]; then
+  die "--master is required (or set it in ${CONFIG_SRC} at start_params.slave.master)"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
@@ -468,16 +495,16 @@ if (!(Test-Path -LiteralPath \$exe)) { Write-Error ('agent.exe missing: ' + \$ex
 \$args = @(
   'slave',
   '--config', '${CONFIG_DEST}',
-  '--master', '${MASTER_URL}',
-  '--heartbeat', '${HEARTBEAT}',
-  '--max-inflight-runs', '${MAX_INFLIGHT_RUNS}',
   '--skills-dir', 'skills',
   '--mcp-config', 'mcp.json'
 )
+if ('${MASTER_URL_SET}' -eq 'true') { \$args += @('--master', '${MASTER_URL}') }
+if ('${HEARTBEAT_SET}' -eq 'true') { \$args += @('--heartbeat', '${HEARTBEAT}') }
+if ('${MAX_INFLIGHT_RUNS_SET}' -eq 'true') { \$args += @('--max-inflight-runs', '${MAX_INFLIGHT_RUNS}') }
 if ('${SLAVE_ID}' -ne '')   { \$args += @('--id',   '${SLAVE_ID}') }
 if ('${SLAVE_NAME}' -ne '') { \$args += @('--name', '${SLAVE_NAME}') }
 if ('${SLAVE_TAGS}' -ne '') { \$args += @('--tags', '${SLAVE_TAGS}') }
-if ('${INSECURE_SKIP_VERIFY}' -eq 'true') { \$args += @('--insecure-skip-verify') }
+if ('${INSECURE_SKIP_VERIFY_SET}' -eq 'true') { \$args += @('--insecure-skip-verify') }
 \$log = Join-Path \$d 'slave.log'
 \$p = Start-Process -FilePath \$exe -ArgumentList \$args -WorkingDirectory \$d -RedirectStandardOutput \$log -RedirectStandardError \$log -PassThru
 \$p.Id | Out-File -LiteralPath (Join-Path \$d 'slave.pid') -Encoding ascii
@@ -494,12 +521,18 @@ try { Get-Process -Id \$p.Id | Select-Object -First 1 Id,ProcessName,Path } catc
   local -a args
   args=( "./agent" "slave"
     "--config" "${remote_config}"
-    "--master" "${MASTER_URL}"
-    "--heartbeat" "${HEARTBEAT}"
-    "--max-inflight-runs" "${MAX_INFLIGHT_RUNS}"
     "--skills-dir" "./skills"
     "--mcp-config" "./mcp.json"
   )
+  if [[ "${MASTER_URL_SET}" == "true" ]]; then
+    args+=( "--master" "${MASTER_URL}" )
+  fi
+  if [[ "${HEARTBEAT_SET}" == "true" ]]; then
+    args+=( "--heartbeat" "${HEARTBEAT}" )
+  fi
+  if [[ "${MAX_INFLIGHT_RUNS_SET}" == "true" ]]; then
+    args+=( "--max-inflight-runs" "${MAX_INFLIGHT_RUNS}" )
+  fi
   if [[ -n "${SLAVE_ID// /}" ]]; then
     args+=( "--id" "${SLAVE_ID}" )
   fi
@@ -509,7 +542,7 @@ try { Get-Process -Id \$p.Id | Select-Object -First 1 Id,ProcessName,Path } catc
   if [[ -n "${SLAVE_TAGS// /}" ]]; then
     args+=( "--tags" "${SLAVE_TAGS}" )
   fi
-  if [[ "${INSECURE_SKIP_VERIFY}" == "true" ]]; then
+  if [[ "${INSECURE_SKIP_VERIFY_SET}" == "true" ]]; then
     args+=( "--insecure-skip-verify" )
   fi
 

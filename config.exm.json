@@ -24,6 +24,21 @@
       "overflow_max_tool_result_chars": 50000
     }
   },
+  "start_params": {
+    "master": {
+      "listen": "127.0.0.1:7788",
+      "ws_path": "/ws",
+      "ui": "tui",
+      "redis_url": "",
+      "heartbeat": "5s"
+    },
+    "slave": {
+      "master": "ws://127.0.0.1:7788/ws",
+      "heartbeat": "5s",
+      "max_inflight_runs": 1,
+      "insecure_skip_verify": false
+    }
+  },
   "cluster": {
     "secret": "",
     "tls": {
@@ -72,5 +87,5 @@
       "dry_run": false
     }
   },
-  "notes": "max_tokens=0 means omit the parameter (provider default applies). Set a positive value to allow longer single responses if your provider defaults are small.\n\nauto_compaction: configure assistant.auto_compaction. Set enabled=false to disable. max_attempts can be 0 to disable retry/summary (hard tool-result truncation still applies). Other numeric fields should be positive."
+  "notes": "start_params: default CLI args for `agent master` / `agent slave` when you don't pass flags.\n\nmax_tokens=0 means omit the parameter (provider default applies). Set a positive value to allow longer single responses if your provider defaults are small.\n\nauto_compaction: configure assistant.auto_compaction. Set enabled=false to disable. max_attempts can be 0 to disable retry/summary (hard tool-result truncation still applies). Other numeric fields should be positive."
 }
