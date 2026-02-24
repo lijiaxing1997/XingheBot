@@ -33,6 +33,7 @@
       "heartbeat": "5s"
     },
     "slave": {
+      "name": "slave-1",
       "master": "ws://127.0.0.1:7788/ws",
       "heartbeat": "5s",
       "max_inflight_runs": 1,
