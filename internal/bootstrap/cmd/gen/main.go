@@ -105,6 +105,11 @@ func buildBundle(root string) ([]byte, error) {
 		_ = gzw.Close()
 		return nil, err
 	}
+	if err := addFile(tw, filepath.Join(root, "reply_style.md"), "templates/reply_style.md", 0o644, fixedTime); err != nil {
+		_ = tw.Close()
+		_ = gzw.Close()
+		return nil, err
+	}
 
 	skills := []string{
 		"skill-creator",

@@ -93,7 +93,7 @@
 ### 2.1 Master
 
 ```bash
-agent master --config config.json
+xinghebot master --config config.json
 ```
 
 > 建议把默认启动参数写进 `config.json`：`start_params.master`（例如 `listen/ws_path/ui/redis_url`），从而避免每次命令行写一长串；命令行参数仍可覆盖配置值。
@@ -108,7 +108,7 @@ agent master --config config.json
 ### 2.2 Slave
 
 ```bash
-agent slave \
+xinghebot slave \
   --config /path/to/slave-config.json \
   --name build-linux-amd64 \
   --id slave-01 \
@@ -610,7 +610,7 @@ MVP 推荐：**内存 registry 为准，Redis 为同步/跨实例**，TUI 读内
    - 认证方式：支持 `ssh key` 与密码两种
      - key：推荐默认路径 `~/.ssh/id_rsa` / `~/.ssh/id_ed25519` 或用户指定
      - password：若要全自动需要 `sshpass`；否则只能走交互式输入
-   - 远端目录：例如 `~/agent-bin/` 或 `/opt/agent/`
+   - 远端目录：例如 `~/xinghebot-bin/` 或 `/opt/xinghebot/`
    - 远端运行用户：是否需要 `sudo`
    - Slave 注册信息：`slave_id`、`name`、`tags`
    - Master WS 地址：`ws://.../ws`（或 `wss://...`）
@@ -623,7 +623,7 @@ MVP 推荐：**内存 registry 为准，Redis 为同步/跨实例**，TUI 读内
    - 推荐 `scp` 或 `rsync -e ssh`
    - 传输后校验：`sha256sum`（可选）
 4) **启动**
-   - 简单方式：`nohup ./agent slave ... > slave.log 2>&1 &`
+   - 简单方式：`nohup ./xinghebot slave ... > slave.log 2>&1 &`
    - 更健壮：写 `systemd` unit（自动重启、开机自启、集中日志）
 5) **验证**
    - `ssh` 查看进程（`ps/pgrep`）
@@ -651,8 +651,8 @@ MVP 推荐：**内存 registry 为准，Redis 为同步/跨实例**，TUI 读内
 
 skill 引导收集后执行：
 - 构建：`bash scripts/build_dist.sh`
-- 上传：`scp dist/agent-linux-amd64 root@10.0.0.12:/opt/agent/agent`
-- 启动：`ssh root@10.0.0.12 'nohup /opt/agent/agent slave ... &'`
+- 上传：`scp dist/xinghebot-linux-amd64 root@10.0.0.12:/opt/xinghebot/xinghebot`
+- 启动：`ssh root@10.0.0.12 'nohup /opt/xinghebot/xinghebot slave ... &'`
 
 ---
 

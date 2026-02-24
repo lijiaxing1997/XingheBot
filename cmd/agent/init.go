@@ -44,6 +44,7 @@ func runInit(role string, configPath string, mcpConfigPath string, skillsDir str
 	}
 
 	printStatus("config", report.ConfigPath)
+	printStatus("reply_style", filepath.Join(filepath.Dir(report.ConfigPath), "reply_style.md"))
 	printStatus("mcp", report.MCPConfigPath)
 	fmt.Fprintf(os.Stdout, "skills: %s\n", strings.TrimSpace(report.SkillsDir))
 

@@ -42,7 +42,7 @@ func LoadClusterConfig(path string) (ClusterConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return ClusterConfig{}, fmt.Errorf("%s not found (hint: run `agent master --init` or `agent slave --init`): %w", strings.TrimSpace(path), err)
+			return ClusterConfig{}, fmt.Errorf("%s not found (hint: run `xinghebot master --init` or `xinghebot slave --init`): %w", strings.TrimSpace(path), err)
 		}
 		return ClusterConfig{}, err
 	}
@@ -109,7 +109,7 @@ func EnsureClusterSecret(configPath string) (secret string, generated bool, err 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", false, fmt.Errorf("%s not found (hint: run `agent master --init`): %w", strings.TrimSpace(path), err)
+			return "", false, fmt.Errorf("%s not found (hint: run `xinghebot master --init`): %w", strings.TrimSpace(path), err)
 		}
 		return "", false, err
 	}

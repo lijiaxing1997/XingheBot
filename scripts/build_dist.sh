@@ -21,10 +21,10 @@ build_one() {
     go build -o "${DIST_DIR}/${out}" ./cmd/agent
 }
 
-build_one linux amd64 "agent-linux-amd64"
-build_one linux arm64 "agent-linux-arm64"
-build_one windows amd64 "agent-windows-amd64.exe"
-build_one windows arm64 "agent-windows-arm64.exe"
+build_one linux amd64 "xinghebot-linux-amd64"
+build_one linux arm64 "xinghebot-linux-arm64"
+build_one windows amd64 "xinghebot-windows-amd64.exe"
+build_one windows arm64 "xinghebot-windows-arm64.exe"
 
 echo "==> done"
 ls -1 "${DIST_DIR}" | sed 's/^/ - /'

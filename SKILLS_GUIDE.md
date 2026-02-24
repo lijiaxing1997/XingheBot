@@ -11,7 +11,7 @@
 你也可以通过以下方式改默认目录：
 
 - 环境变量：`SKILLS_DIR=/abs/or/relative/path`
-- CLI 参数：`agent chat --skills-dir <path>` / `agent worker --skills-dir <path>`
+- CLI 参数：`xinghebot chat --skills-dir <path>` / `xinghebot worker --skills-dir <path>`
 
 为避免“目录乱建”，进程启动时会把 `--skills-dir` 解析为**绝对路径**，并在主/子 Agent 之间传递同一个绝对路径。
 
@@ -58,7 +58,7 @@ skills/<skill-name>/
 
 ## 5) 常用命令
 
-- 列出 skills：`agent skills list`
-- 创建 skill：`agent skills create --name <name> --description <desc>`
-- 安装 skill（本地）：`agent skills install --local <dir>`
-- 安装 skill（GitHub）：`agent skills install --repo owner/repo --path path/in/repo --ref main`
+- 列出 skills：`xinghebot skills list`
+- 创建 skill：`xinghebot skills create --name <name> --description <desc>`
+- 安装 skill（本地）：`xinghebot skills install --local <dir>`
+- 安装 skill（GitHub）：`xinghebot skills install --repo owner/repo --path path/in/repo --ref main`

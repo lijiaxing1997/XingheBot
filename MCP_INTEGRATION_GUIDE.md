@@ -32,8 +32,8 @@ The agent now supports MCP runtime reload without restarting the agent process:
 
 Note:
 
-- `agent chat` 默认 dispatcher 模式下，主 Agent 仅挂载控制面工具（`agent_*` / `subagents`），不会挂载 MCP runtime/tools（因此 `/mcp reload` 会提示未配置）。
-- 如需在主进程启用 MCP：使用 `agent chat --chat-tool-mode full`，或把 MCP 相关工作交给子 Agent（worker）执行。
+- `xinghebot chat` 默认 dispatcher 模式下，主 Agent 仅挂载控制面工具（`agent_*` / `subagents`），不会挂载 MCP runtime/tools（因此 `/mcp reload` 会提示未配置）。
+- 如需在主进程启用 MCP：使用 `xinghebot chat --chat-tool-mode full`，或把 MCP 相关工作交给子 Agent（worker）执行。
 
 What it does:
 

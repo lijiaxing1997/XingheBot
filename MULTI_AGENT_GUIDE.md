@@ -57,7 +57,7 @@
 
 ### 4.1 TUI 自动回传（主窗口自动分析子 Agent 结果）
 
-在 `agent chat --ui=tui` 中：
+在 `xinghebot chat --ui=tui` 中：
 
 - 子 Agent 进入终态（`completed/failed/canceled`）后，TUI 会把该子 Agent 的结果（含输出预览、路径等）写入主对话的 `[System Message]`。
 - 随后主 Agent 会基于该 `[System Message]` + 主对话上下文，自动生成一条**用户可读**的综合回复（避免直接 dump 原始日志）。
@@ -77,12 +77,12 @@ worker 在结束时会自动向 run-level signals 发布 `agent_finished`（payl
 
 ## 5. CLI 入口
 
-- 交互模式：`agent chat ...`
-- 子 Agent worker 进程：`agent worker --run-root ... --run-id ... --agent-id ...`
+- 交互模式：`xinghebot chat ...`
+- 子 Agent worker 进程：`xinghebot worker --run-root ... --run-id ... --agent-id ...`
 
-`agent chat` 默认是 dispatcher 模式：主 Agent 只允许调用 `agent_*` / `subagents`，避免主 Agent“直接干活”。如需允许主 Agent 直接使用文件/exec 等工具，可用：`agent chat --chat-tool-mode full`（不推荐，除非你明确要把主 Agent 当单体 Agent 用）。
+`xinghebot chat` 默认是 dispatcher 模式：主 Agent 只允许调用 `agent_*` / `subagents`，避免主 Agent“直接干活”。如需允许主 Agent 直接使用文件/exec 等工具，可用：`xinghebot chat --chat-tool-mode full`（不推荐，除非你明确要把主 Agent 当单体 Agent 用）。
 
-`agent_spawn` 会自动拉起 `agent worker`，通常不需要手动执行。
+`agent_spawn` 会自动拉起 `xinghebot worker`，通常不需要手动执行。
 
 ## 6. 主 Agent 回复风格 / 人设（可选）
 
@@ -148,7 +148,7 @@ worker 在结束时会自动向 run-level signals 发布 `agent_finished`（payl
 
 ## 8. 自动定期清理（类似 OpenClaw 的 archiveAfterMinutes）
 
-`agent chat` 会在后台启动一个清理 sweeper，按配置定期把**已结束**的 run 从 `.multi_agent/runs` 归档到 `.multi_agent/archive`（默认 **archive**，不会直接删除）。
+`xinghebot chat` 会在后台启动一个清理 sweeper，按配置定期把**已结束**的 run 从 `.multi_agent/runs` 归档到 `.multi_agent/archive`（默认 **archive**，不会直接删除）。
 
 配置位置：`config.json` 的 `multi_agent.cleanup`。
 

@@ -11,14 +11,15 @@ Usage:
 Required:
   --host <host>                 Target host (IP/DNS)
   --user <user>                 SSH user
-  --remote-dir <dir>            Remote install dir (Linux: /opt/agent, Windows: C:/opt/agent)
+  --remote-dir <dir>            Remote install dir (Linux: /opt/xinghebot, Windows: C:/opt/xinghebot)
 
 SSH:
   --port <port>                 SSH port (default: 22)
   --key <path>                  SSH private key (recommended)
+  --password-file <path>        Read SSH password from file (1st line). Requires sshpass. (optional)
   Password auth is supported via sshpass:
     - install sshpass
-    - export SSHPASS='<password>'
+    - export SSHPASS='<password>'   (zsh: if contains "!" use single quotes)
 
 Slave identity:
   --id <slave_id>               Stable slave id (optional)
@@ -30,10 +31,10 @@ Slave identity:
   --insecure-skip-verify         Skip TLS cert verify for wss:// (dangerous; optional; else use config/start_params)
 
 Sync options:
-  --no-binary                   Do not upload the agent binary
-  --bin <path>                  Local agent binary path (override auto selection)
+  --no-binary                   Do not upload the xinghebot binary
+  --bin <path>                  Local xinghebot binary path (override auto selection)
 
-  --remote-init                 Run remote `agent slave --init` after uploading binary (default: on)
+  --remote-init                 Run remote `xinghebot slave --init` after uploading binary (default: on)
   --no-remote-init              Do not run remote init
 
   --sync-config                 Upload slave config (default: on)
@@ -56,9 +57,9 @@ Start/verify:
 
 Notes:
   - Auto binary selection detects the remote OS/arch and picks:
-      - Linux:   dist/agent-linux-{amd64,arm64}
-      - Windows: dist/agent-windows-{amd64,arm64}.exe
-    If missing, it runs `bash scripts/build_dist.sh`.
+      - Linux:   dist/xinghebot-linux-{amd64,arm64}
+      - Windows: dist/xinghebot-windows-{amd64,arm64}.exe
+    If missing, it will suggest downloading the right binary (or build via `bash scripts/build_dist.sh`).
   - Default skills (minimal self-evolution set):
       skill-installer, skill-creator, mcp-builder, mcp-config-manager, ssh-deploy-slave
 EOF
@@ -71,6 +72,7 @@ HOST=""
 USER=""
 PORT="22"
 KEY=""
+PASSWORD_FILE=""
 REMOTE_DIR=""
 MASTER_URL=""
 MASTER_URL_SET="false"
@@ -111,6 +113,7 @@ while [[ $# -gt 0 ]]; do
     --user) USER="${2:-}"; shift 2 ;;
     --port) PORT="${2:-}"; shift 2 ;;
     --key) KEY="${2:-}"; shift 2 ;;
+    --password-file) PASSWORD_FILE="${2:-}"; shift 2 ;;
     --remote-dir) REMOTE_DIR="${2:-}"; shift 2 ;;
     --master) MASTER_URL="${2:-}"; MASTER_URL_SET="true"; shift 2 ;;
 
@@ -189,7 +192,15 @@ if [[ -n "${KEY// /}" ]]; then
   SCP_BASE+=(-i "${KEY}")
 fi
 
-if command -v sshpass >/dev/null 2>&1 && [[ -n "${SSHPASS:-}" ]]; then
+if [[ -n "${SSHPASS:-}" ]] && ! command -v sshpass >/dev/null 2>&1; then
+  die "SSHPASS is set but sshpass is not installed. Install sshpass or use --key."
+fi
+if [[ -n "${PASSWORD_FILE// /}" ]]; then
+  [[ -f "${PASSWORD_FILE}" ]] || die "--password-file not found: ${PASSWORD_FILE}"
+  command -v sshpass >/dev/null 2>&1 || die "--password-file requires sshpass (install it or use --key)"
+  SSH_BASE=(sshpass -f "${PASSWORD_FILE}" "${SSH_BASE[@]}")
+  SCP_BASE=(sshpass -f "${PASSWORD_FILE}" "${SCP_BASE[@]}")
+elif command -v sshpass >/dev/null 2>&1 && [[ -n "${SSHPASS:-}" ]]; then
   SSH_BASE=(sshpass -e "${SSH_BASE[@]}")
   SCP_BASE=(sshpass -e "${SCP_BASE[@]}")
 fi
@@ -201,6 +212,27 @@ normalize_remote_dir_for_scp() {
 }
 
 REMOTE_DIR_SCP="$(normalize_remote_dir_for_scp "${REMOTE_DIR}")"
+
+ensure_ssh_auth() {
+  # If stdin is not a TTY (e.g. running via an agent tool), interactive prompts will hang.
+  if [[ -t 0 ]]; then
+    return 0
+  fi
+  if [[ "${SSH_BASE[0]}" == "sshpass" ]]; then
+    return 0
+  fi
+
+  local -a test_ssh
+  test_ssh=(ssh -p "${PORT}")
+  if [[ -n "${KEY// /}" ]]; then
+    test_ssh+=(-i "${KEY}")
+  fi
+  test_ssh+=(-o BatchMode=yes -o ConnectTimeout=10)
+
+  if ! "${test_ssh[@]}" "${SSH_TARGET}" "true" >/dev/null 2>&1; then
+    die "SSH requires an interactive prompt, but stdin is not a TTY. Use --key, or install sshpass and set SSHPASS/--password-file."
+  fi
+}
 
 detect_remote_os() {
   local sys
@@ -222,6 +254,7 @@ detect_remote_os() {
   echo "linux"
 }
 
+ensure_ssh_auth
 REMOTE_OS="$(detect_remote_os)"
 
 ps_encode() {
@@ -271,11 +304,11 @@ New-Item -ItemType Directory -Force -Path \$d, (Join-Path \$d 'skills'), (Join-P
 }
 
 remote_init() {
-  log "remote init: agent slave --init (config=${CONFIG_DEST})"
+  log "remote init: xinghebot slave --init (config=${CONFIG_DEST})"
   if [[ "${REMOTE_OS}" == "windows" ]]; then
     remote_exec_win "$(win_ps_prelude)
-\$exe = Join-Path \$d 'agent.exe'
-if (!(Test-Path -LiteralPath \$exe)) { Write-Error ('agent.exe missing: ' + \$exe); exit 2 }
+\$exe = Join-Path \$d 'xinghebot.exe'
+if (!(Test-Path -LiteralPath \$exe)) { Write-Error ('xinghebot.exe missing: ' + \$exe); exit 2 }
 \$args = @(
   'slave',
   '--init',
@@ -287,7 +320,7 @@ if (!(Test-Path -LiteralPath \$exe)) { Write-Error ('agent.exe missing: ' + \$ex
     return 0
   fi
 
-  remote_exec_unix "cd '${REMOTE_DIR}' && test -x './agent' && ./agent slave --init --config '${CONFIG_DEST}' --skills-dir './skills' --mcp-config './mcp.json'"
+  remote_exec_unix "cd '${REMOTE_DIR}' && test -x './xinghebot' && ./xinghebot slave --init --config '${CONFIG_DEST}' --skills-dir './skills' --mcp-config './mcp.json'"
 }
 
 detect_remote_arch() {
@@ -320,17 +353,29 @@ select_local_bin() {
   local goarch
   goarch="$(detect_remote_arch)"
   local candidate=""
+  local legacy=""
   if [[ "${REMOTE_OS}" == "windows" ]]; then
-    candidate="dist/agent-windows-${goarch}.exe"
+    candidate="dist/xinghebot-windows-${goarch}.exe"
+    legacy="dist/agent-windows-${goarch}.exe"
   else
-    candidate="dist/agent-linux-${goarch}"
+    candidate="dist/xinghebot-linux-${goarch}"
+    legacy="dist/agent-linux-${goarch}"
   fi
   if [[ -f "${candidate}" ]]; then
     echo "${candidate}"
     return 0
   fi
-  log "missing ${candidate}, building dist..."
-  bash scripts/build_dist.sh >/dev/null
+  if [[ -f "${legacy}" ]]; then
+    log "using legacy binary name: ${legacy} (consider rebuilding to dist/xinghebot-*)"
+    echo "${legacy}"
+    return 0
+  fi
+
+  log "missing ${candidate}"
+  log "note: cross-platform deploy requires the matching binary in ./dist/ (download it or build via: bash scripts/build_dist.sh)"
+  command -v go >/dev/null 2>&1 || die "go is not installed, cannot build ${candidate}. Download the correct binary into ./dist/ and re-run."
+  log "building dist..."
+  bash scripts/build_dist.sh
   [[ -f "${candidate}" ]] || die "build finished but binary still missing: ${candidate}"
   echo "${candidate}"
 }
@@ -338,16 +383,16 @@ select_local_bin() {
 sync_binary() {
   local src="$1"
   if [[ "${REMOTE_OS}" == "windows" ]]; then
-    log "upload agent binary: ${src} -> ${REMOTE_DIR_SCP}/agent.exe"
-    "${SCP_BASE[@]}" "${src}" "${SSH_TARGET}:${REMOTE_DIR_SCP}/agent.exe.tmp"
+    log "upload xinghebot binary: ${src} -> ${REMOTE_DIR_SCP}/xinghebot.exe"
+    "${SCP_BASE[@]}" "${src}" "${SSH_TARGET}:${REMOTE_DIR_SCP}/xinghebot.exe.tmp"
     remote_exec_win "$(win_ps_prelude)
-Move-Item -LiteralPath (Join-Path \$d 'agent.exe.tmp') -Destination (Join-Path \$d 'agent.exe') -Force"
+Move-Item -LiteralPath (Join-Path \$d 'xinghebot.exe.tmp') -Destination (Join-Path \$d 'xinghebot.exe') -Force"
     return 0
   fi
 
-  log "upload agent binary: ${src} -> ${REMOTE_DIR}/agent"
-  "${SCP_BASE[@]}" "${src}" "${SSH_TARGET}:${REMOTE_DIR}/agent.tmp"
-  remote_exec_unix "chmod +x '${REMOTE_DIR}/agent.tmp' && mv -f '${REMOTE_DIR}/agent.tmp' '${REMOTE_DIR}/agent'"
+  log "upload xinghebot binary: ${src} -> ${REMOTE_DIR}/xinghebot"
+  "${SCP_BASE[@]}" "${src}" "${SSH_TARGET}:${REMOTE_DIR}/xinghebot.tmp"
+  remote_exec_unix "chmod +x '${REMOTE_DIR}/xinghebot.tmp' && mv -f '${REMOTE_DIR}/xinghebot.tmp' '${REMOTE_DIR}/xinghebot'"
 }
 
 sync_config() {
@@ -490,8 +535,8 @@ if (!(Test-Path -LiteralPath (Join-Path \$d '${CONFIG_DEST}'))) { exit 2 }"; the
 
     remote_exec_win "$(win_ps_prelude)
 ${stop_ps}
-\$exe = Join-Path \$d 'agent.exe'
-if (!(Test-Path -LiteralPath \$exe)) { Write-Error ('agent.exe missing: ' + \$exe); exit 2 }
+\$exe = Join-Path \$d 'xinghebot.exe'
+if (!(Test-Path -LiteralPath \$exe)) { Write-Error ('xinghebot.exe missing: ' + \$exe); exit 2 }
 \$args = @(
   'slave',
   '--config', '${CONFIG_DEST}',
@@ -519,7 +564,7 @@ try { Get-Process -Id \$p.Id | Select-Object -First 1 Id,ProcessName,Path } catc
   remote_exec_unix "test -f '${REMOTE_DIR}/${CONFIG_DEST}'" || die "remote config missing: ${REMOTE_DIR}/${CONFIG_DEST} (use --sync-config or upload it manually)"
 
   local -a args
-  args=( "./agent" "slave"
+  args=( "./xinghebot" "slave"
     "--config" "${remote_config}"
     "--skills-dir" "./skills"
     "--mcp-config" "./mcp.json"

@@ -194,7 +194,7 @@ func LoadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Config{}, fmt.Errorf("%s not found (hint: run `agent chat --init` or `agent master --init` / `agent slave --init`): %w", strings.TrimSpace(path), err)
+			return Config{}, fmt.Errorf("%s not found (hint: run `xinghebot chat --init` or `xinghebot master --init` / `xinghebot slave --init`): %w", strings.TrimSpace(path), err)
 		}
 		return Config{}, err
 	}

@@ -61,6 +61,7 @@ func Init(opts InitOptions) (InitReport, error) {
 	var configTemplate []byte
 	var slaveConfigTemplate []byte
 	var mcpTemplate []byte
+	var replyStyleTemplate []byte
 
 	if err := os.MkdirAll(report.SkillsDir, 0o755); err != nil {
 		return report, err
@@ -106,6 +107,13 @@ func Init(opts InitOptions) (InitReport, error) {
 			}
 			mcpTemplate = b
 			continue
+		case "templates/reply_style.md":
+			b, err := io.ReadAll(io.LimitReader(tr, hdr.Size))
+			if err != nil {
+				return report, err
+			}
+			replyStyleTemplate = b
+			continue
 		}
 
 		if strings.HasPrefix(clean, "skills/") {
@@ -124,6 +132,10 @@ func Init(opts InitOptions) (InitReport, error) {
 		return report, err
 	}
 	if err := writeTemplateFile(report.MCPConfigPath, 0o644, mcpTemplate, &report); err != nil {
+		return report, err
+	}
+	replyStyleDest := filepath.Join(filepath.Dir(report.ConfigPath), "reply_style.md")
+	if err := writeTemplateFile(replyStyleDest, 0o644, replyStyleTemplate, &report); err != nil {
 		return report, err
 	}
 
