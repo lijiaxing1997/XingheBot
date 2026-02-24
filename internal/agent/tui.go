@@ -1439,6 +1439,9 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	switch key {
 	case "ctrl+c":
 		return true, tea.Quit
+	case "ctrl+e":
+		m.forceKillCurrentSubagent()
+		return true, nil
 	case "ctrl+r":
 		return true, tuiLoadSessionsCmd(m.coord)
 	case "ctrl+n":
@@ -1519,6 +1522,113 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		return true, nil
 	}
 	return false, nil
+}
+
+func (m *tuiModel) forceKillCurrentSubagent() {
+	runID := strings.TrimSpace(m.currentRunID())
+	if runID == "" || m.coord == nil {
+		return
+	}
+	agentID := strings.TrimSpace(m.currentAgentID())
+	if agentID == "" || agentID == tuiPrimaryAgentID {
+		m.notice = "Select a sub-agent with TAB to kill it."
+		m.rerender()
+		return
+	}
+
+	state, err := m.coord.ReadAgentState(runID, agentID)
+	if err != nil {
+		m.notice = "Read agent state: " + err.Error()
+		m.rerender()
+		return
+	}
+	if multiagent.IsTerminalStatus(state.Status) {
+		m.notice = "Agent already finished."
+		m.rerender()
+		return
+	}
+
+	now := time.Now().UTC()
+	_, cmdErr := m.coord.AppendCommand(runID, agentID, multiagent.AgentCommand{
+		Type: multiagent.CommandCancel,
+		Payload: map[string]any{
+			"reason": "killed by operator via Ctrl+E",
+			"force":  true,
+		},
+		CreatedAt: now,
+	})
+	if cmdErr != nil {
+		m.notice = "Queue cancel: " + cmdErr.Error()
+		m.rerender()
+		return
+	}
+	_, _ = m.coord.AppendEvent(runID, agentID, multiagent.AgentEvent{
+		Type:      "cancel_requested",
+		Message:   "cancel queued by operator (Ctrl+E)",
+		CreatedAt: now,
+		Payload: map[string]any{
+			"force": true,
+		},
+	})
+
+	pid := state.PID
+	if pid <= 0 {
+		m.notice = "Cancel queued. PID missing; process may not have started yet."
+		m.agentIndex = 0
+		m.refreshAgentIDs()
+		m.rerender()
+		return
+	}
+	if pid == os.Getpid() {
+		m.notice = fmt.Sprintf("Cancel queued. Refusing to kill current process (pid=%d).", pid)
+		m.agentIndex = 0
+		m.refreshAgentIDs()
+		m.rerender()
+		return
+	}
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		m.notice = "Find process: " + err.Error()
+		m.rerender()
+		return
+	}
+	if err := proc.Kill(); err != nil {
+		m.notice = "Kill process: " + err.Error()
+		m.rerender()
+		return
+	}
+
+	finished := time.Now().UTC()
+	if latest, err := m.coord.ReadAgentState(runID, agentID); err == nil && !multiagent.IsTerminalStatus(latest.Status) {
+		latest.Status = multiagent.StatusCanceled
+		latest.Error = "killed by operator"
+		latest.FinishedAt = finished
+		latest.UpdatedAt = finished
+		_ = m.coord.UpdateAgentState(runID, latest)
+		_ = m.coord.WriteResult(runID, agentID, multiagent.AgentResult{
+			RunID:      runID,
+			AgentID:    agentID,
+			Status:     multiagent.StatusCanceled,
+			Error:      "killed by operator",
+			FinishedAt: finished,
+		})
+		_, _ = m.coord.AppendEvent(runID, agentID, multiagent.AgentEvent{
+			Type:      "process_killed",
+			Message:   "process killed by operator (Ctrl+E)",
+			CreatedAt: finished,
+			Payload: map[string]any{
+				"pid": pid,
+			},
+		})
+	}
+
+	m.notice = fmt.Sprintf("Killed sub-agent %s (pid=%d).", agentID, pid)
+	m.agentIndex = 0
+	m.refreshAgentIDs()
+	m.cursorLine = -1
+	m.stickToBottom = true
+	m.rerender()
 }
 
 func (m tuiModel) View() string {
@@ -1693,8 +1803,23 @@ func (m *tuiModel) refreshSlaves() {
 	}
 	slaves := m.slaveProvider.SnapshotSlaves()
 	sort.Slice(slaves, func(i, j int) bool {
-		if slaves[i].Status != slaves[j].Status {
-			return slaves[i].Status < slaves[j].Status
+		weight := func(status string) int {
+			switch strings.ToLower(strings.TrimSpace(status)) {
+			case "online":
+				return 0
+			case "offline":
+				return 1
+			default:
+				return 2
+			}
+		}
+		wi := weight(slaves[i].Status)
+		wj := weight(slaves[j].Status)
+		if wi != wj {
+			return wi < wj
+		}
+		if !slaves[i].LastSeen.Equal(slaves[j].LastSeen) {
+			return slaves[i].LastSeen.After(slaves[j].LastSeen)
 		}
 		if slaves[i].Name != slaves[j].Name {
 			return slaves[i].Name < slaves[j].Name
@@ -2903,13 +3028,25 @@ func (m *tuiModel) renderSlavesLines(width int, height int) []string {
 	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
 	online := make([]SlaveSummary, 0, len(m.slaves))
+	offline := make([]SlaveSummary, 0, len(m.slaves))
 	for _, s := range m.slaves {
 		if strings.EqualFold(strings.TrimSpace(s.Status), "online") {
 			online = append(online, s)
+			continue
 		}
+		offline = append(offline, s)
 	}
-	if len(online) == 0 {
-		lines = append(lines, truncateANSI(mutedStyle.Render("(no slaves online)"), width-1))
+
+	renderSlaveLine := func(dot string, label string, age string) {
+		line := fmt.Sprintf("%s %s", dot, label)
+		if strings.TrimSpace(age) != "" {
+			line += " " + age
+		}
+		lines = append(lines, truncateANSI(line, width-1))
+	}
+
+	if len(online) == 0 && len(offline) == 0 {
+		lines = append(lines, truncateANSI(mutedStyle.Render("(no slaves)"), width-1))
 	} else {
 		for _, s := range online {
 			label := strings.TrimSpace(s.SlaveID)
@@ -2918,12 +3055,19 @@ func (m *tuiModel) renderSlavesLines(width int, height int) []string {
 			} else if name != "" {
 				label = name
 			}
-			age := formatAge(s.LastSeen)
-			line := fmt.Sprintf("%s %s", onlineStyle.Render("●"), label)
-			if age != "" {
-				line += " " + mutedStyle.Render(age)
+			renderSlaveLine(onlineStyle.Render("●"), label, mutedStyle.Render(formatAge(s.LastSeen)))
+			if len(lines) >= height {
+				return lines[:height]
 			}
-			lines = append(lines, truncateANSI(line, width-1))
+		}
+		for _, s := range offline {
+			label := strings.TrimSpace(s.SlaveID)
+			if name := strings.TrimSpace(s.Name); name != "" && strings.TrimSpace(s.SlaveID) != "" {
+				label = fmt.Sprintf("%s (%s)", name, strings.TrimSpace(s.SlaveID))
+			} else if name != "" {
+				label = name
+			}
+			renderSlaveLine(mutedStyle.Render("○"), mutedStyle.Render(label), mutedStyle.Render(formatAge(s.LastSeen)))
 			if len(lines) >= height {
 				return lines[:height]
 			}
@@ -3053,15 +3197,28 @@ func (m *tuiModel) renderStatus(width int, height int) string {
 		hidden := fmt.Sprintf("hidden finished: %d (Ctrl+T to show)", m.hiddenDone)
 		lines = append(lines, truncateANSI(hintStyle.Render(hidden), width-1))
 	}
-	hint := truncateANSI(hintStyle.Render("TAB: switch agent | Ctrl+T: toggle finished"), width-1)
+
+	hints := []string{
+		hintStyle.Render("TAB: switch agent"),
+		hintStyle.Render("Ctrl+T: toggle finished"),
+		hintStyle.Render("Ctrl+E: kill sub-agent"),
+	}
+	for i := range hints {
+		hints[i] = truncateANSI(hints[i], width-1)
+	}
 	if height > 0 {
-		need := height - len(lines) - 1
+		for len(hints) > 0 && height-len(lines)-len(hints) < 0 {
+			hints = hints[:len(hints)-1]
+		}
+	}
+	if height > 0 {
+		need := height - len(lines) - len(hints)
 		for need > 0 {
 			lines = append(lines, "")
 			need--
 		}
 	}
-	lines = append(lines, hint)
+	lines = append(lines, hints...)
 	contentW := max(0, width-1)
 	for i := range lines {
 		lines[i] = fitPanelLine(lines[i], contentW)

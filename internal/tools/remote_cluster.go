@@ -15,6 +15,8 @@ import (
 	"test_skill_agent/internal/cluster"
 	"test_skill_agent/internal/llm"
 	"test_skill_agent/internal/multiagent"
+
+	"nhooyr.io/websocket"
 )
 
 type RemoteSlaveListTool struct {
@@ -94,6 +96,189 @@ func (t *RemoteSlaveListTool) Call(ctx context.Context, args json.RawMessage) (s
 		"checked_at":  time.Now().UTC(),
 		"slaves":      slaves,
 	})
+}
+
+type RemoteSlaveDisconnectTool struct {
+	Registry *cluster.SlaveRegistry
+	Presence cluster.PresenceStore
+}
+
+type remoteSlaveDisconnectArgs struct {
+	SlaveID string `json:"slave_id"`
+	Reason  string `json:"reason"`
+}
+
+func (t *RemoteSlaveDisconnectTool) Definition() llm.ToolDefinition {
+	return llm.ToolDefinition{
+		Type: "function",
+		Function: llm.ToolFunctionDef{
+			Name:        "remote_slave_disconnect",
+			Description: "Disconnect an online slave node from the current master. This closes the slave's WebSocket session.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"slave_id": map[string]any{"type": "string"},
+					"reason":   map[string]any{"type": "string"},
+				},
+				"required": []string{"slave_id"},
+			},
+		},
+	}
+}
+
+func (t *RemoteSlaveDisconnectTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
+	if t.Registry == nil {
+		return "", errors.New("slave registry is not configured")
+	}
+	var in remoteSlaveDisconnectArgs
+	if err := json.Unmarshal(args, &in); err != nil {
+		return "", err
+	}
+	slaveID := strings.TrimSpace(in.SlaveID)
+	if slaveID == "" {
+		return "", errors.New("slave_id is required")
+	}
+
+	rec, ok := t.Registry.Get(slaveID)
+	if !ok {
+		return prettyJSON(map[string]any{
+			"status":   "not_found",
+			"slave_id": slaveID,
+		})
+	}
+
+	if rec.Session == nil || !strings.EqualFold(strings.TrimSpace(string(rec.Info.Status)), string(cluster.SlaveStatusOnline)) {
+		return prettyJSON(map[string]any{
+			"status":   "offline",
+			"slave_id": slaveID,
+			"slave":    rec.Info,
+		})
+	}
+
+	reason := strings.TrimSpace(in.Reason)
+	if reason == "" {
+		reason = "disconnected by operator"
+	}
+
+	now := time.Now().UTC()
+	rec.Session.Close(websocket.StatusPolicyViolation, reason)
+	t.Registry.SetOffline(slaveID, rec.Session, now)
+
+	if t.Presence != nil {
+		delCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = t.Presence.Delete(delCtx, slaveID)
+		cancel()
+	}
+
+	return prettyJSON(map[string]any{
+		"status":     "disconnected",
+		"slave_id":   slaveID,
+		"reason":     reason,
+		"dispatched": true,
+		"checked_at": now,
+		"slave":      rec.Info,
+	})
+}
+
+type RemoteSlaveForgetTool struct {
+	Registry *cluster.SlaveRegistry
+	Presence cluster.PresenceStore
+}
+
+type remoteSlaveForgetArgs struct {
+	SlaveID string `json:"slave_id"`
+	Force   bool   `json:"force"`
+	Reason  string `json:"reason"`
+}
+
+func (t *RemoteSlaveForgetTool) Definition() llm.ToolDefinition {
+	return llm.ToolDefinition{
+		Type: "function",
+		Function: llm.ToolFunctionDef{
+			Name: "remote_slave_forget",
+			Description: "Forget a slave node from the master's registry. " +
+				"By default this only removes offline entries; set force=true to disconnect first if the slave is online.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"slave_id": map[string]any{"type": "string"},
+					"force":    map[string]any{"type": "boolean"},
+					"reason":   map[string]any{"type": "string"},
+				},
+				"required": []string{"slave_id"},
+			},
+		},
+	}
+}
+
+func (t *RemoteSlaveForgetTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
+	if t.Registry == nil {
+		return "", errors.New("slave registry is not configured")
+	}
+	var in remoteSlaveForgetArgs
+	if err := json.Unmarshal(args, &in); err != nil {
+		return "", err
+	}
+	slaveID := strings.TrimSpace(in.SlaveID)
+	if slaveID == "" {
+		return "", errors.New("slave_id is required")
+	}
+
+	now := time.Now().UTC()
+
+	rec, ok := t.Registry.Get(slaveID)
+	if !ok {
+		return prettyJSON(map[string]any{
+			"status":     "not_found",
+			"slave_id":   slaveID,
+			"checked_at": now,
+		})
+	}
+
+	isOnline := rec.Session != nil && strings.EqualFold(strings.TrimSpace(string(rec.Info.Status)), string(cluster.SlaveStatusOnline))
+	if isOnline && !in.Force {
+		return prettyJSON(map[string]any{
+			"status":     "online",
+			"slave_id":   slaveID,
+			"error":      "slave is online; disconnect first or set force=true",
+			"checked_at": now,
+			"slave":      rec.Info,
+		})
+	}
+
+	reason := strings.TrimSpace(in.Reason)
+	if reason == "" {
+		reason = "forgotten by operator"
+	}
+
+	disconnected := false
+	if isOnline && in.Force {
+		rec.Session.Close(websocket.StatusPolicyViolation, reason)
+		t.Registry.SetOffline(slaveID, rec.Session, now)
+		disconnected = true
+	}
+
+	removed, removedOK := t.Registry.Delete(slaveID)
+	if t.Presence != nil {
+		delCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = t.Presence.Delete(delCtx, slaveID)
+		cancel()
+	}
+
+	out := map[string]any{
+		"status":       "forgotten",
+		"slave_id":     slaveID,
+		"force":        in.Force,
+		"disconnected": disconnected,
+		"checked_at":   now,
+	}
+	if removedOK && removed != nil {
+		out["slave"] = removed.Info
+		out["was_online"] = removed.Session != nil
+	} else {
+		out["note"] = "slave entry disappeared before delete"
+	}
+	return prettyJSON(out)
 }
 
 type RemoteAgentRunTool struct {

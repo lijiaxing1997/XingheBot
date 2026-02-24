@@ -243,6 +243,8 @@ func runMaster(args []string) error {
 	}()
 
 	rt.Registry.Register(&tools.RemoteSlaveListTool{Registry: gw.Registry()})
+	rt.Registry.Register(&tools.RemoteSlaveDisconnectTool{Registry: gw.Registry(), Presence: presence})
+	rt.Registry.Register(&tools.RemoteSlaveForgetTool{Registry: gw.Registry(), Presence: presence})
 	rt.Registry.Register(&tools.RemoteAgentRunTool{Gateway: gw, Coordinator: rt.Coordinator})
 	rt.Registry.Register(&tools.RemoteFilePutTool{Gateway: gw})
 	rt.Registry.Register(&tools.RemoteFileGetTool{Gateway: gw})
