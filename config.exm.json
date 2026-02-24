@@ -1,8 +1,8 @@
 {
-  "api_key": "sk-3b7dd428d530441797a87ff41bf98258",
+  "api_key": "sk-apikey-REPLACE_ME",
   "tavily_api_key": "tvly-REPLACE_ME",
-  "base_url": "https://api.deepseek.com",
-  "model": "deepseek-chat",
+  "base_url": "https://api.deepseek.com-REPLACE_ME",
+  "model": "deepseek-chat-REPLACE_ME",
   "max_tokens": 0,
   "assistant": {
     "reply_style": {
@@ -41,7 +41,7 @@
     "enabled": false,
     "email": {
       "provider": "126",
-      "email_address": "xingheai@126.com",
+      "email_address": "xingheai@126.com-REPLACE_ME",
       "authorization_code": "REPLACE_ME",
       "imap": {
         "server": "imap.126.com",
@@ -54,7 +54,7 @@
         "use_ssl": true
       },
       "poll_interval_seconds": 5,
-      "allowed_senders": "jiaxingl@126.com"
+      "allowed_senders": "jiaxingl@126.com-REPLACE_ME"
     }
   },
   "multi_agent": {
