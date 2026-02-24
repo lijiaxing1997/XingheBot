@@ -71,7 +71,7 @@ python scripts/restore_config.py file config.json
 
 ### 配置文件结构
 
-- **config.json**: DeepSeek API配置（API密钥、模型等）
+- **config.json**: 运行配置（LLM: `model_config`；Web 搜索: `web_search`；以及 `assistant/cluster/gateway/...` 等）
 - **mcp.json**: 当前MCP服务器配置
 - **mcp.exm.json**: 示例MCP配置
 

@@ -22,6 +22,14 @@ def load_json_file(filename):
         print(f"读取 {filename} 时出错: {e}")
         return None
 
+def mask_secret(value: str) -> str:
+    """隐藏敏感信息的部分内容"""
+    if not value:
+        return ""
+    if len(value) <= 12:
+        return "***"
+    return value[:8] + "..." + value[-4:]
+
 def show_config_info():
     """显示config.json信息"""
     config = load_json_file("config.json")
@@ -31,14 +39,52 @@ def show_config_info():
     
     print("📋 config.json 配置信息:")
     print("=" * 50)
-    
-    for key, value in config.items():
-        if key == "api_key" and value:
-            # 隐藏API密钥的部分内容
-            masked_key = value[:8] + "..." + value[-4:] if len(value) > 12 else "***"
-            print(f"  {key}: {masked_key}")
-        else:
-            print(f"  {key}: {value}")
+
+    model_config = config.get("model_config", {})
+    if isinstance(model_config, dict) and model_config:
+        print("  model_config:")
+        for key, value in model_config.items():
+            if key == "api_key" and isinstance(value, str) and value:
+                print(f"    {key}: {mask_secret(value)}")
+            else:
+                print(f"    {key}: {value}")
+    else:
+        # Back-compat for legacy flat keys.
+        legacy_keys = ["api_key", "base_url", "model", "max_tokens"]
+        for key in legacy_keys:
+            if key not in config:
+                continue
+            value = config.get(key)
+            if key == "api_key" and isinstance(value, str) and value:
+                print(f"  {key}: {mask_secret(value)}")
+            else:
+                print(f"  {key}: {value}")
+
+    web_search = config.get("web_search", {})
+    if isinstance(web_search, dict) and web_search:
+        print("  web_search:")
+        for key, value in web_search.items():
+            if key.endswith("_api_key") and isinstance(value, str) and value:
+                print(f"    {key}: {mask_secret(value)}")
+            else:
+                print(f"    {key}: {value}")
+    elif "tavily_api_key" in config:
+        value = config.get("tavily_api_key")
+        if isinstance(value, str) and value:
+            print(f"  tavily_api_key: {mask_secret(value)}")
+
+    ignored = {"model_config", "web_search", "api_key", "base_url", "model", "max_tokens", "tavily_api_key"}
+    other_keys = sorted([k for k in config.keys() if k not in ignored])
+    if other_keys:
+        print("  other:")
+        for k in other_keys:
+            v = config.get(k)
+            if isinstance(v, dict):
+                print(f"    {k}: object ({len(v)} keys)")
+            elif isinstance(v, list):
+                print(f"    {k}: array ({len(v)} items)")
+            else:
+                print(f"    {k}: {v}")
     
     print()
 

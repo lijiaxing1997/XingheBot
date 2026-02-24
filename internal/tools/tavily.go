@@ -55,9 +55,15 @@ func (t tavilyTool) loadAPIKey() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	key := strings.TrimSpace(cfg.TavilyAPIKey)
+	key := ""
+	if cfg.WebSearch != nil {
+		key = strings.TrimSpace(cfg.WebSearch.TavilyAPIKey)
+	}
 	if key == "" {
-		return "", errors.New("tavily_api_key is required (set TAVILY_API_KEY or add tavily_api_key to config.json)")
+		key = strings.TrimSpace(cfg.TavilyAPIKey)
+	}
+	if key == "" {
+		return "", errors.New("web_search.tavily_api_key is required (set TAVILY_API_KEY or add web_search.tavily_api_key to config.json)")
 	}
 	return key, nil
 }
@@ -181,7 +187,7 @@ func (t *TavilySearchTool) Definition() llm.ToolDefinition {
 		Type: "function",
 		Function: llm.ToolFunctionDef{
 			Name:        "tavily_search",
-			Description: "Search the web via Tavily Search API. Requires `tavily_api_key` in config.json or env `TAVILY_API_KEY`.",
+			Description: "Search the web via Tavily Search API. Requires `web_search.tavily_api_key` in config.json or env `TAVILY_API_KEY`.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -269,7 +275,7 @@ func (t *TavilyExtractTool) Definition() llm.ToolDefinition {
 		Type: "function",
 		Function: llm.ToolFunctionDef{
 			Name:        "tavily_extract",
-			Description: "Batch extract content from URLs via Tavily Extract API. Requires `tavily_api_key` in config.json or env `TAVILY_API_KEY`.",
+			Description: "Batch extract content from URLs via Tavily Extract API. Requires `web_search.tavily_api_key` in config.json or env `TAVILY_API_KEY`.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -360,7 +366,7 @@ func (t *TavilyCrawlTool) Definition() llm.ToolDefinition {
 		Type: "function",
 		Function: llm.ToolFunctionDef{
 			Name:        "tavily_crawl",
-			Description: "Crawl a URL via Tavily Crawl API. Requires `tavily_api_key` in config.json or env `TAVILY_API_KEY`.",
+			Description: "Crawl a URL via Tavily Crawl API. Requires `web_search.tavily_api_key` in config.json or env `TAVILY_API_KEY`.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{

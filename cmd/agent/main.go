@@ -112,6 +112,9 @@ func shouldAutoSuperviseChat(args []string) bool {
 	if !isChatInvocation(args) {
 		return false
 	}
+	if hasInitFlag(args) {
+		return false
+	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return false
 	}
@@ -130,6 +133,19 @@ func isChatInvocation(args []string) bool {
 	}
 }
 
+func hasInitFlag(args []string) bool {
+	for _, a := range args {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		if a == "--init" || a == "-init" || strings.HasPrefix(a, "--init=") || strings.HasPrefix(a, "-init=") {
+			return true
+		}
+	}
+	return false
+}
+
 func runChat(args []string) error {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
 	skillsDir := fs.String("skills-dir", defaultSkillsDir(), "skills directory")
@@ -140,9 +156,13 @@ func runChat(args []string) error {
 	configPath := fs.String("config", "config.json", "path to config.json")
 	mcpConfigPath := fs.String("mcp-config", "mcp.json", "path to MCP config")
 	multiAgentRoot := fs.String("multi-agent-root", ".multi_agent/runs", "path to multi-agent run storage")
+	initFlag := fs.Bool("init", false, "initialize config/mcp/skills from embedded bundle, then exit")
 	fs.Parse(args)
 
 	resolvedSkillsDir := resolvePath(*skillsDir)
+	if *initFlag {
+		return runInit(*configPath, *mcpConfigPath, resolvedSkillsDir)
+	}
 	controlPlaneOnly := true
 	if strings.EqualFold(strings.TrimSpace(*chatToolMode), string(agent.ChatToolModeFull)) {
 		controlPlaneOnly = false

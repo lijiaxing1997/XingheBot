@@ -1,9 +1,13 @@
 {
-  "api_key": "sk-apikey-REPLACE_ME",
-  "tavily_api_key": "tvly-REPLACE_ME",
-  "base_url": "https://api.deepseek.com-REPLACE_ME",
-  "model": "deepseek-chat-REPLACE_ME",
-  "max_tokens": 0,
+  "model_config": {
+    "api_key": "sk-apikey-REPLACE_ME",
+    "base_url": "https://api.deepseek.com-REPLACE_ME",
+    "model": "deepseek-chat-REPLACE_ME",
+    "max_tokens": 0
+  },
+  "web_search": {
+    "tavily_api_key": "tvly-REPLACE_ME"
+  },
   "assistant": {
     "reply_style": {
       "enabled": true,

@@ -18,7 +18,9 @@ func writeTempTavilyConfig(t *testing.T, apiKey string) string {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	payload := map[string]any{
-		"tavily_api_key": apiKey,
+		"web_search": map[string]any{
+			"tavily_api_key": apiKey,
+		},
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -146,7 +148,7 @@ func TestTavilyToolsRequireAPIKey(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected missing api key error")
 	}
-	if !strings.Contains(err.Error(), "tavily_api_key is required") {
-		t.Fatalf("expected tavily_api_key is required, got: %v", err)
+	if !strings.Contains(err.Error(), "web_search.tavily_api_key is required") {
+		t.Fatalf("expected web_search.tavily_api_key is required, got: %v", err)
 	}
 }

@@ -86,12 +86,27 @@ type Client struct {
 }
 
 type Config struct {
-	APIKey       string          `json:"api_key"`
-	TavilyAPIKey string          `json:"tavily_api_key"`
-	BaseURL      string          `json:"base_url"`
-	Model        string          `json:"model"`
-	MaxTokens    int             `json:"max_tokens"`
-	Assistant    AssistantConfig `json:"assistant"`
+	ModelConfig *ModelConfig     `json:"model_config"`
+	WebSearch   *WebSearchConfig `json:"web_search"`
+	Assistant   AssistantConfig  `json:"assistant"`
+
+	// Legacy flat keys (deprecated).
+	APIKey       string `json:"api_key,omitempty"`
+	BaseURL      string `json:"base_url,omitempty"`
+	Model        string `json:"model,omitempty"`
+	MaxTokens    int    `json:"max_tokens,omitempty"`
+	TavilyAPIKey string `json:"tavily_api_key,omitempty"`
+}
+
+type ModelConfig struct {
+	APIKey    string `json:"api_key"`
+	BaseURL   string `json:"base_url"`
+	Model     string `json:"model"`
+	MaxTokens int    `json:"max_tokens"`
+}
+
+type WebSearchConfig struct {
+	TavilyAPIKey string `json:"tavily_api_key"`
 }
 
 type AssistantConfig struct {
@@ -144,15 +159,16 @@ func NewClientFromConfig(path string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	apiKey := strings.TrimSpace(cfg.APIKey)
+	mc := cfg.resolvedModelConfig()
+	apiKey := strings.TrimSpace(mc.APIKey)
 	if apiKey == "" {
-		return nil, errors.New("api_key is required in config.json")
+		return nil, errors.New("model_config.api_key (or legacy api_key) is required in config.json")
 	}
-	baseURL := strings.TrimSpace(cfg.BaseURL)
+	baseURL := strings.TrimSpace(mc.BaseURL)
 	if baseURL == "" {
 		baseURL = "https://api.openai.com"
 	}
-	model := strings.TrimSpace(cfg.Model)
+	model := strings.TrimSpace(mc.Model)
 	if model == "" {
 		model = "gpt-4o-mini"
 	}
@@ -160,7 +176,7 @@ func NewClientFromConfig(path string) (*Client, error) {
 		BaseURL:   strings.TrimRight(baseURL, "/"),
 		APIKey:    apiKey,
 		Model:     model,
-		MaxTokens: cfg.MaxTokens,
+		MaxTokens: mc.MaxTokens,
 		HTTPClient: &http.Client{
 			Timeout: 120 * time.Second,
 		},
@@ -177,6 +193,9 @@ func LoadConfig(path string) (Config, error) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return Config{}, fmt.Errorf("%s not found (hint: run `agent chat --init` or `agent master --init` / `agent slave --init`): %w", strings.TrimSpace(path), err)
+		}
 		return Config{}, err
 	}
 	var cfg Config
@@ -184,6 +203,18 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parse config.json: %w", err)
 	}
 	return cfg, nil
+}
+
+func (c Config) resolvedModelConfig() ModelConfig {
+	if c.ModelConfig != nil {
+		return *c.ModelConfig
+	}
+	return ModelConfig{
+		APIKey:    c.APIKey,
+		BaseURL:   c.BaseURL,
+		Model:     c.Model,
+		MaxTokens: c.MaxTokens,
+	}
 }
 
 func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {

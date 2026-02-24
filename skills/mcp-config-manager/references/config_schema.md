@@ -2,31 +2,48 @@
 
 ## config.json 结构
 
-`config.json` 文件包含DeepSeek API的配置信息：
+`config.json` 文件包含运行所需的核心配置。为方便集中管理，和 LLM/Web 搜索相关的配置集中在两个键下：
+
+- `model_config`：LLM 供应商/模型配置
+- `web_search`：Web 搜索（Tavily）配置
 
 ```json
 {
-  "api_key": "sk-3b7dd428d530441797a87ff41bf98258",
-  "base_url": "https://api.deepseek.com",
-  "model": "deepseek-chat",
-  "max_tokens": 8192
+  "model_config": {
+    "api_key": "sk-3b7dd428d530441797a87ff41bf98258",
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-chat",
+    "max_tokens": 8192
+  },
+  "web_search": {
+    "tavily_api_key": "tvly-REPLACE_ME"
+  }
 }
 ```
 
 ### 字段说明
 
+#### model_config
+
 | 字段 | 类型 | 说明 | 示例 |
 |------|------|------|------|
-| `api_key` | string | DeepSeek API密钥 | `"sk-3b7dd428d530441797a87ff41bf98258"` |
+| `api_key` | string | LLM API密钥 | `"sk-3b7dd428d530441797a87ff41bf98258"` |
 | `base_url` | string | API基础URL | `"https://api.deepseek.com"` |
 | `model` | string | 使用的模型名称 | `"deepseek-chat"` |
-| `max_tokens` | integer | 最大token数 | `8192` |
+| `max_tokens` | integer | 最大 token 数（`0` 表示省略该参数，使用 provider 默认值） | `8192` |
+
+#### web_search
+
+| 字段 | 类型 | 说明 | 示例 |
+|------|------|------|------|
+| `tavily_api_key` | string | Tavily API Key（也可用环境变量 `TAVILY_API_KEY`） | `"tvly-REPLACE_ME"` |
 
 ### 注意事项
 
 1. **API密钥安全**：API密钥是敏感信息，不应公开分享
 2. **模型选择**：根据需求选择合适的模型
-3. **Token限制**：根据模型能力设置合适的max_tokens值
+3. **Token限制**：根据模型能力设置合适的 `max_tokens` 值（或设为 `0` 省略该参数）
+4. **兼容说明**：旧版顶层 `api_key/base_url/model/max_tokens/tavily_api_key` 仍可读取，但推荐迁移到 `model_config`/`web_search`
 
 ## mcp.json 结构
 

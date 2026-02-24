@@ -8,6 +8,9 @@ CGO_ENABLED="${CGO_ENABLED:-0}"
 cd "${ROOT_DIR}"
 mkdir -p "${DIST_DIR}"
 
+echo "==> generate init bundle"
+go generate ./internal/bootstrap
+
 build_one() {
   local goos="$1"
   local goarch="$2"

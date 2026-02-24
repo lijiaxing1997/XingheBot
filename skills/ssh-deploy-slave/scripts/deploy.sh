@@ -33,6 +33,9 @@ Sync options:
   --no-binary                   Do not upload the agent binary
   --bin <path>                  Local agent binary path (override auto selection)
 
+  --remote-init                 Run remote `agent slave --init` after uploading binary (default: on)
+  --no-remote-init              Do not run remote init
+
   --sync-config                 Upload slave config (default: on)
   --no-sync-config              Do not upload slave config
   --config-src <path>           Local config file (default: ./slave-config.json)
@@ -42,7 +45,7 @@ Sync options:
   --mcp-src <path>              Local mcp.json path (default: ./mcp.json)
   --sync-mcp-runtime            Upload MCP runtime files (bin/ + mcp/ for built-in calculator) (default: off)
 
-  --sync-skills                 Upload skills (default: on)
+  --sync-skills                 Upload skills (default: off; use remote --init instead)
   --no-sync-skills              Do not upload skills
   --skills <a,b,c>              Skill dir names under ./skills (default: minimal set)
   --sync-all-skills             Upload ALL ./skills/* (default: off)
@@ -57,7 +60,7 @@ Notes:
       - Windows: dist/agent-windows-{amd64,arm64}.exe
     If missing, it runs `bash scripts/build_dist.sh`.
   - Default skills (minimal self-evolution set):
-      skill-installer, skill-creator, mcp-builder, mcp-config-manager
+      skill-installer, skill-creator, mcp-builder, mcp-config-manager, ssh-deploy-slave
 EOF
 }
 
@@ -81,6 +84,8 @@ INSECURE_SKIP_VERIFY="false"
 SYNC_BINARY="true"
 BIN_PATH=""
 
+REMOTE_INIT="true"
+
 SYNC_CONFIG="true"
 CONFIG_SRC="./slave-config.json"
 CONFIG_DEST="slave-config.json"
@@ -89,7 +94,7 @@ SYNC_MCP="false"
 MCP_SRC="./mcp.json"
 SYNC_MCP_RUNTIME="false"
 
-SYNC_SKILLS="true"
+SYNC_SKILLS="false"
 SKILLS_CSV=""
 SYNC_ALL_SKILLS="false"
 
@@ -115,6 +120,9 @@ while [[ $# -gt 0 ]]; do
 
     --no-binary) SYNC_BINARY="false"; shift ;;
     --bin) BIN_PATH="${2:-}"; shift 2 ;;
+
+    --remote-init) REMOTE_INIT="true"; shift ;;
+    --no-remote-init) REMOTE_INIT="false"; shift ;;
 
     --sync-config) SYNC_CONFIG="true"; shift ;;
     --no-sync-config) SYNC_CONFIG="false"; shift ;;
@@ -235,6 +243,26 @@ New-Item -ItemType Directory -Force -Path \$d, (Join-Path \$d 'skills'), (Join-P
   remote_exec_unix "mkdir -p '${REMOTE_DIR}' '${REMOTE_DIR}/skills' '${REMOTE_DIR}/bin' '${REMOTE_DIR}/mcp'"
 }
 
+remote_init() {
+  log "remote init: agent slave --init (config=${CONFIG_DEST})"
+  if [[ "${REMOTE_OS}" == "windows" ]]; then
+    remote_exec_win "$(win_ps_prelude)
+\$exe = Join-Path \$d 'agent.exe'
+if (!(Test-Path -LiteralPath \$exe)) { Write-Error ('agent.exe missing: ' + \$exe); exit 2 }
+\$args = @(
+  'slave',
+  '--init',
+  '--config', '${CONFIG_DEST}',
+  '--skills-dir', 'skills',
+  '--mcp-config', 'mcp.json'
+)
+& \$exe @args"
+    return 0
+  fi
+
+  remote_exec_unix "cd '${REMOTE_DIR}' && test -x './agent' && ./agent slave --init --config '${CONFIG_DEST}' --skills-dir './skills' --mcp-config './mcp.json'"
+}
+
 detect_remote_arch() {
   local arch
   if [[ "${REMOTE_OS}" == "windows" ]]; then
@@ -320,7 +348,7 @@ sync_skills() {
   elif [[ -n "${SKILLS_CSV// /}" ]]; then
     IFS=',' read -r -a skills <<<"${SKILLS_CSV}"
   else
-    skills=("skill-installer" "skill-creator" "mcp-builder" "mcp-config-manager")
+    skills=("skill-installer" "skill-creator" "mcp-builder" "mcp-config-manager" "ssh-deploy-slave")
   fi
 
   local -a paths
@@ -502,6 +530,10 @@ remote_mkdirs
 if [[ "${SYNC_BINARY}" == "true" ]]; then
   bin="$(select_local_bin)"
   sync_binary "${bin}"
+fi
+
+if [[ "${REMOTE_INIT}" == "true" ]]; then
+  remote_init
 fi
 
 if [[ "${SYNC_CONFIG}" == "true" ]]; then

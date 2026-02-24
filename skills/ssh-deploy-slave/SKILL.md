@@ -9,6 +9,8 @@ metadata:
 
 目标：从 Master 机器用 SSH 把 `agent` 以 `slave` 模式部署到远端，并支持后续“更新二进制 / 更新配置 / 更新 skills / 更新 mcp.json / 重启与验证”等日常运维操作。
 
+> 新增：`agent` 二进制支持 `--init`（master/slave/chat 均可用）。部署到远端后可先执行 `agent slave --init` 自动生成配置模板（`slave-config.json`/`mcp.json`）并释放内置 skills（最小集合），从而避免手动同步 skills 目录。
+
 ## 你需要先确认的关键点（必须问清楚）
 
 1) **远端信息**：`host`、`port`、`user`、认证方式（SSH key 或密码）。
@@ -16,6 +18,7 @@ metadata:
 3) **Slave 身份**：`slave_id`（稳定 ID）、`name`（展示名）、`tags`（可选）。
 4) **要同步哪些文件**（可选择）：
    - 二进制：必选（Linux：`dist/agent-linux-amd64` / `dist/agent-linux-arm64`；Windows：`dist/agent-windows-amd64.exe` / `dist/agent-windows-arm64.exe`；或用户指定路径）
+   - 远端 `--init`：推荐（在远端自动生成 `slave-config.json`/`mcp.json` 并释放内置 skills）
    - `slave-config.json`：可选（推荐给 Slave 独立 API Key）
    - `mcp.json`：可选
    - `skills/`：可选（推荐至少同步“自我进化”最小集合，见下）
@@ -41,12 +44,12 @@ metadata:
 
 ### 可选：Slave 配置（`slave-config.json`）
 
-Slave 节点必须有自己的 LLM 配置（至少包含 `api_key/base_url/model`），并且必须包含与 Master 相同的 `cluster.secret`。
+Slave 节点必须有自己的 LLM 配置（至少包含 `model_config.api_key/base_url/model`），并且必须包含与 Master 相同的 `cluster.secret`。
 
 推荐从 `config.exm.json` 复制出一个 **最小化** 的 `slave-config.json`，重点字段：
 
-- `api_key`：Slave 自己的 key（不要复用 Master，除非你确认风险）
-- `base_url/model/max_tokens`：按你的 provider 填
+- `model_config.api_key`：Slave 自己的 key（不要复用 Master，除非你确认风险）
+- `model_config.base_url/model/max_tokens`：按你的 provider 填
 - `cluster.secret`：从 Master 的 `config.json` 里复制（Master 启动后会自动生成/写入）
 - `cluster.tls.insecure_skip_verify`：若 Master 用自签 `wss://` 且你允许跳过校验，则设为 `true`
 - `cluster.files`：可选（用于 WS 文件传输落盘目录与配额）
@@ -65,12 +68,13 @@ Slave 节点必须有自己的 LLM 配置（至少包含 `api_key/base_url/model
 
 ### 可选（推荐）：Skills（让 Slave 具备“自我进化”能力）
 
-默认只同步以下四个（推荐的最小集合）：
+如不使用远端 `--init`，默认只同步以下五个（推荐的最小集合）：
 
 - `skills/skill-installer`
 - `skills/skill-creator`
 - `skills/mcp-builder`
 - `skills/mcp-config-manager`
+- `skills/ssh-deploy-slave`
 
 建议部署到远端：
 
@@ -84,7 +88,8 @@ Slave 节点必须有自己的 LLM 配置（至少包含 `api_key/base_url/model
 
 脚本能力：
 - 自动判断远端 **OS/架构**（Linux/Windows + amd64/arm64），自动选择/构建对应 `dist/agent-*`
-- 默认同步：二进制 + `slave-config.json` + skills（默认最小集合）
+- 默认：上传二进制后执行远端 `agent slave --init`（生成 `slave-config.json`/`mcp.json` 模板，并释放内置 skills 最小集合）
+- 默认同步：二进制 + `slave-config.json`（用于写入真实 `model_config.api_key` / `cluster.secret` 等；skills 同步默认关闭）
 - 可选同步：`mcp.json`、MCP 运行时文件（`bin/` + `mcp/`）、指定 skills（默认最小集合，可切换为全量）
 - 可选启动/重启 Slave：
   - Linux：`nohup` + `slave.pid` + `slave.log`
@@ -133,6 +138,7 @@ bash skills/ssh-deploy-slave/scripts/deploy.sh \
 bash skills/ssh-deploy-slave/scripts/deploy.sh \
   --host 10.0.0.12 --user root --key ~/.ssh/id_ed25519 \
   --remote-dir /opt/agent \
+  --sync-skills --no-remote-init \
   --no-binary --no-sync-config --no-start
 ```
 

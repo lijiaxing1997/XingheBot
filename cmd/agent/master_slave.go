@@ -33,9 +33,13 @@ func runMaster(args []string) error {
 	wsPath := fs.String("ws-path", "/ws", "websocket path")
 	redisURL := fs.String("redis-url", "", "redis url for presence/route (optional)")
 	heartbeat := fs.Duration("heartbeat", 5*time.Second, "expected slave heartbeat interval")
+	initFlag := fs.Bool("init", false, "initialize config/mcp/skills from embedded bundle, then exit")
 	fs.Parse(args)
 
 	resolvedSkillsDir := resolvePath(*skillsDir)
+	if *initFlag {
+		return runInit(*configPath, *mcpConfigPath, resolvedSkillsDir)
+	}
 	controlPlaneOnly := true
 	if strings.EqualFold(strings.TrimSpace(*chatToolMode), string(agent.ChatToolModeFull)) {
 		controlPlaneOnly = false
@@ -222,7 +226,13 @@ func runSlave(args []string) error {
 	heartbeat := fs.Duration("heartbeat", 5*time.Second, "heartbeat interval")
 	maxInflight := fs.Int("max-inflight-runs", 1, "max concurrent agent.run executions")
 	insecureSkipVerify := fs.Bool("insecure-skip-verify", false, "skip TLS certificate verification for wss:// (dangerous)")
+	initFlag := fs.Bool("init", false, "initialize config/mcp/skills from embedded bundle, then exit")
 	fs.Parse(args)
+
+	resolvedSkillsDir := resolvePath(*skillsDir)
+	if *initFlag {
+		return runInit(*configPath, *mcpConfigPath, resolvedSkillsDir)
+	}
 
 	if strings.TrimSpace(*masterURL) == "" {
 		return errors.New("--master is required")
@@ -237,7 +247,6 @@ func runSlave(args []string) error {
 		return fmt.Errorf("cluster.secret missing/invalid in %s (copy it from the master config): %w", strings.TrimSpace(*configPath), err)
 	}
 
-	resolvedSkillsDir := resolvePath(*skillsDir)
 	rt, err := newAgentRuntime(runtimeOptions{
 		SkillsDir:        resolvedSkillsDir,
 		Temperature:      *temperature,
