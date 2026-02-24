@@ -5,9 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -121,6 +123,32 @@ func runMaster(args []string) error {
 		}()
 	}
 
+	isTUI := func() bool {
+		switch strings.ToLower(strings.TrimSpace(*uiMode)) {
+		case "", "tui":
+			return true
+		default:
+			return false
+		}
+	}()
+
+	var gwLog *log.Logger
+	var gwLogFile *os.File
+	if isTUI {
+		runRoot := resolvePath(*multiAgentRoot)
+		logDir := filepath.Dir(runRoot)
+		if strings.TrimSpace(logDir) == "" {
+			logDir = ".multi_agent"
+		}
+		_ = os.MkdirAll(logDir, 0o755)
+		f, err := os.OpenFile(filepath.Join(logDir, "master_gateway.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err == nil {
+			gwLogFile = f
+			gwLog = log.New(f, "", log.LstdFlags)
+			defer func() { _ = gwLogFile.Close() }()
+		}
+	}
+
 	gw, err := cluster.NewMasterGateway(cluster.MasterGatewayOptions{
 		Secret:   secretBytes,
 		Registry: cluster.NewSlaveRegistry(),
@@ -136,7 +164,13 @@ func runMaster(args []string) error {
 		HeartbeatInterval: *heartbeat,
 		AcceptOriginAny:   true,
 		Logf: func(format string, args ...any) {
-			fmt.Fprintf(os.Stderr, format+"\n", args...)
+			if gwLog != nil {
+				gwLog.Printf(format, args...)
+				return
+			}
+			if !isTUI {
+				fmt.Fprintf(os.Stderr, format+"\n", args...)
+			}
 		},
 	})
 	if err != nil {
@@ -205,7 +239,7 @@ func runMaster(args []string) error {
 	}()
 
 	rt.Registry.Register(&tools.RemoteSlaveListTool{Registry: gw.Registry()})
-	rt.Registry.Register(&tools.RemoteAgentRunTool{Gateway: gw})
+	rt.Registry.Register(&tools.RemoteAgentRunTool{Gateway: gw, Coordinator: rt.Coordinator})
 	rt.Registry.Register(&tools.RemoteFilePutTool{Gateway: gw})
 	rt.Registry.Register(&tools.RemoteFileGetTool{Gateway: gw})
 

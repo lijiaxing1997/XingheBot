@@ -32,16 +32,16 @@ type MasterGatewayOptions struct {
 }
 
 type MasterGateway struct {
-	secret            []byte
-	instanceID        string
-	registry          *SlaveRegistry
-	presence          PresenceStore
+	secret             []byte
+	instanceID         string
+	registry           *SlaveRegistry
+	presence           PresenceStore
 	presenceTTLSeconds int
 	files              FilesConfig
-	heartbeatInterval time.Duration
-	maxMessageBytes   int64
-	registerTimeout   time.Duration
-	sendHeartbeatAck  bool
+	heartbeatInterval  time.Duration
+	maxMessageBytes    int64
+	registerTimeout    time.Duration
+	sendHeartbeatAck   bool
 
 	auth AuthVerifier
 	logf func(format string, args ...any)
@@ -51,10 +51,10 @@ type MasterGateway struct {
 	pendingMu sync.Mutex
 	pending   map[string]chan AgentResultPayload
 
-	fileMu              sync.Mutex
-	pendingFileReplies  map[string]chan fileOfferReply
-	pendingFileOffers   map[string]chan FileOfferPayload
-	pendingFileAcks     map[string]chan FileAckPayload
+	fileMu                sync.Mutex
+	pendingFileReplies    map[string]chan fileOfferReply
+	pendingFileOffers     map[string]chan FileOfferPayload
+	pendingFileAcks       map[string]chan FileAckPayload
 	incomingFileTransfers map[string]*incomingFileTransfer
 }
 
@@ -117,22 +117,22 @@ func NewMasterGateway(opts MasterGatewayOptions) (*MasterGateway, error) {
 	}
 
 	g := &MasterGateway{
-		secret:            opts.Secret,
-		instanceID:        instanceID,
-		registry:          reg,
-		presence:          presence,
-		presenceTTLSeconds: ttlSeconds,
-		files:              filesCfg,
-		heartbeatInterval: hb,
-		maxMessageBytes:   maxMsg,
-		registerTimeout:   regTimeout,
-		sendHeartbeatAck:  opts.HeartbeatAckEnable,
-		logf:              logf,
-		originPatterns:    originPatterns,
-		pending:           make(map[string]chan AgentResultPayload),
-		pendingFileReplies:  make(map[string]chan fileOfferReply),
-		pendingFileOffers:   make(map[string]chan FileOfferPayload),
-		pendingFileAcks:     make(map[string]chan FileAckPayload),
+		secret:                opts.Secret,
+		instanceID:            instanceID,
+		registry:              reg,
+		presence:              presence,
+		presenceTTLSeconds:    ttlSeconds,
+		files:                 filesCfg,
+		heartbeatInterval:     hb,
+		maxMessageBytes:       maxMsg,
+		registerTimeout:       regTimeout,
+		sendHeartbeatAck:      opts.HeartbeatAckEnable,
+		logf:                  logf,
+		originPatterns:        originPatterns,
+		pending:               make(map[string]chan AgentResultPayload),
+		pendingFileReplies:    make(map[string]chan fileOfferReply),
+		pendingFileOffers:     make(map[string]chan FileOfferPayload),
+		pendingFileAcks:       make(map[string]chan FileAckPayload),
 		incomingFileTransfers: make(map[string]*incomingFileTransfer),
 	}
 	g.auth = AuthVerifier{
@@ -343,6 +343,57 @@ func (g *MasterGateway) deliverAgentResult(requestID string, res AgentResultPayl
 	case ch <- res:
 	default:
 	}
+}
+
+func (g *MasterGateway) StartAgentRun(ctx context.Context, slaveID string, payload AgentRunPayload) (string, <-chan AgentResultPayload, func(), error) {
+	if g == nil {
+		return "", nil, nil, errors.New("gateway is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	id := strings.TrimSpace(slaveID)
+	if id == "" {
+		return "", nil, nil, errors.New("slave id is required")
+	}
+
+	rec, ok := g.registry.Get(id)
+	if !ok || rec.Session == nil {
+		return "", nil, nil, fmt.Errorf("slave offline: %s", id)
+	}
+	reqID := NewID("req")
+	env, err := NewEnvelope(MsgTypeAgentRun, reqID, payload)
+	if err != nil {
+		return reqID, nil, nil, err
+	}
+	msg, err := env.Marshal()
+	if err != nil {
+		return reqID, nil, nil, err
+	}
+
+	ch := make(chan AgentResultPayload, 1)
+	g.pendingMu.Lock()
+	if g.pending == nil {
+		g.pending = make(map[string]chan AgentResultPayload)
+	}
+	g.pending[reqID] = ch
+	g.pendingMu.Unlock()
+
+	var once sync.Once
+	cleanup := func() {
+		once.Do(func() {
+			g.pendingMu.Lock()
+			delete(g.pending, reqID)
+			g.pendingMu.Unlock()
+		})
+	}
+
+	if err := rec.Session.WriteText(ctx, msg); err != nil {
+		cleanup()
+		return reqID, nil, nil, err
+	}
+
+	return reqID, ch, cleanup, nil
 }
 
 func (g *MasterGateway) SendAgentRun(ctx context.Context, slaveID string, payload AgentRunPayload, timeout time.Duration) (string, AgentResultPayload, error) {

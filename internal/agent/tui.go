@@ -45,8 +45,8 @@ const (
 )
 
 type TUIOptions struct {
-	Coordinator *multiagent.Coordinator
-	ConfigPath  string
+	Coordinator   *multiagent.Coordinator
+	ConfigPath    string
 	SlaveProvider SlaveListProvider
 }
 
@@ -124,7 +124,7 @@ type tuiModel struct {
 	spinnerFrame  int
 
 	loading            bool
-	busy               bool
+	busyRuns           map[string]bool
 	notice             string
 	restartPending     bool
 	restartRequestedAt time.Time
@@ -179,7 +179,8 @@ type tuiAppendHistoryMsg struct {
 }
 
 type tuiSetBusyMsg struct {
-	Busy bool
+	RunID string
+	Busy  bool
 }
 
 type tuiSetNoticeMsg struct {
@@ -244,12 +245,56 @@ func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator, c
 		cursorLine:        -1,
 		stickToBottom:     true,
 		showDone:          false,
+		busyRuns:          make(map[string]bool),
 		banner:            banner,
 		gatewayConfigPath: strings.TrimSpace(configPath),
 		emailGateway:      emailGateway,
 		gatewayEnabled:    enabled,
 		gatewayEmail:      emailAddr,
 	}
+}
+
+func (m *tuiModel) setRunBusy(runID string, busy bool) {
+	if m == nil {
+		return
+	}
+	id := strings.TrimSpace(runID)
+	if id == "" {
+		return
+	}
+	if m.busyRuns == nil {
+		m.busyRuns = make(map[string]bool)
+	}
+	if busy {
+		m.busyRuns[id] = true
+		return
+	}
+	delete(m.busyRuns, id)
+}
+
+func (m *tuiModel) isRunBusy(runID string) bool {
+	if m == nil || m.busyRuns == nil {
+		return false
+	}
+	id := strings.TrimSpace(runID)
+	if id == "" {
+		return false
+	}
+	return m.busyRuns[id]
+}
+
+func (m *tuiModel) currentRunBusy() bool {
+	if m == nil {
+		return false
+	}
+	return m.isRunBusy(m.currentRunID())
+}
+
+func (m *tuiModel) anyBusy() bool {
+	if m == nil || len(m.busyRuns) == 0 {
+		return false
+	}
+	return true
 }
 
 func (m tuiModel) Init() tea.Cmd {
@@ -331,7 +376,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.restartPending = true
 		m.restartRequestedAt = time.Now().UTC()
 	}
-	if m.restartPending && !m.busy {
+	if m.restartPending && !m.anyBusy() {
 		return m, tea.Quit
 	}
 	if m.restartPending && !m.restartRequestedAt.IsZero() && time.Since(m.restartRequestedAt) > 3*time.Second {
@@ -348,7 +393,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiAsyncMsg:
 		m.handleAsyncEvent(msg.Event)
 		m.rerender()
-		if m.restartPending && !m.busy {
+		if m.restartPending && !m.anyBusy() {
 			return m, tea.Quit
 		}
 		return m, waitAsyncCmd(m.events)
@@ -389,7 +434,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rerender()
 		return m, nil
 	case tuiRefreshMsg:
-		if m.restartPending && !m.busy {
+		if m.restartPending && !m.anyBusy() {
 			return m, tea.Quit
 		}
 		if m.currentRunID() == "" {
@@ -403,7 +448,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.maybeAutoFollowup()
 		m.maybeProcessGatewayInbox()
 		m.rerender()
-		if m.restartPending && !m.busy {
+		if m.restartPending && !m.anyBusy() {
 			return m, tea.Quit
 		}
 		return m, tuiTickCmd()
@@ -495,7 +540,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if handled {
 			return m, cmd
 		}
-		if m.busy || m.currentAgentID() != tuiPrimaryAgentID {
+		if m.currentRunBusy() || m.currentAgentID() != tuiPrimaryAgentID {
 			return m, nil
 		}
 		m.input, cmd = m.input.Update(msg)
@@ -519,11 +564,11 @@ func (m *tuiModel) maybeAutoFollowup() {
 	if m == nil || m.coord == nil || m.agent == nil {
 		return
 	}
-	if m.busy {
-		return
-	}
 	runID := strings.TrimSpace(m.currentRunID())
 	if runID == "" {
+		return
+	}
+	if m.isRunBusy(runID) {
 		return
 	}
 
@@ -630,7 +675,7 @@ func (m *tuiModel) maybeAutoFollowup() {
 			emailReply = &reply
 		}
 	}
-	m.busy = true
+	m.setRunBusy(runID, true)
 	m.notice = ""
 	m.stickToBottom = true
 	m.cursorLine = -1
@@ -642,7 +687,7 @@ func (m *tuiModel) maybeProcessGatewayInbox() {
 	if m == nil {
 		return
 	}
-	if m.busy {
+	if m.anyBusy() {
 		return
 	}
 	if len(m.gatewayInbox) == 0 {
@@ -696,7 +741,7 @@ func (m *tuiModel) processGatewayEmail(in gateway.EmailInbound) {
 	sess.History = append(sess.History, userMsg)
 	_ = appendJSONL(sess.HistoryPath, userMsg)
 
-	m.busy = true
+	m.setRunBusy(runID, true)
 	m.notice = ""
 	m.stickToBottom = true
 	m.cursorLine = -1
@@ -959,7 +1004,7 @@ func (m *tuiModel) runTurnEmail(runID string, userText string, baseHistory []llm
 	gw := m.emailGateway
 
 	defer func() {
-		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{Busy: false}}
+		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{RunID: runID, Busy: false}}
 	}()
 
 	var finalText string
@@ -1285,7 +1330,7 @@ func (m *tuiModel) runAutoFollowup(runID string, baseHistory []llm.Message, emai
 	gw := m.emailGateway
 
 	defer func() {
-		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{Busy: false}}
+		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{RunID: runID, Busy: false}}
 	}()
 
 	var finalText string
@@ -1352,8 +1397,12 @@ func (m *tuiModel) handleAsyncEvent(evt tea.Msg) {
 			m.cursorLine = -1
 		}
 	case tuiSetBusyMsg:
-		m.busy = msg.Busy
-		if !m.busy {
+		runID := strings.TrimSpace(msg.RunID)
+		if runID == "" {
+			runID = m.currentRunID()
+		}
+		m.setRunBusy(runID, msg.Busy)
+		if !m.anyBusy() {
 			m.maybeProcessGatewayInbox()
 		}
 	case tuiSetNoticeMsg:
@@ -1738,11 +1787,11 @@ func (m *tuiModel) toggleToolAtCursor() {
 }
 
 func (m *tuiModel) submitInput() tea.Cmd {
-	if m.busy {
-		return nil
-	}
 	runID := m.currentRunID()
 	if strings.TrimSpace(runID) == "" {
+		return nil
+	}
+	if m.isRunBusy(runID) {
 		return nil
 	}
 	text := strings.TrimSpace(m.input.Value())
@@ -1766,7 +1815,7 @@ func (m *tuiModel) submitInput() tea.Cmd {
 		}
 		return tea.Quit
 	case "/mcp reload", "/mcp-reload":
-		m.busy = true
+		m.setRunBusy(runID, true)
 		m.notice = ""
 		m.stickToBottom = true
 		m.cursorLine = -1
@@ -1775,7 +1824,7 @@ func (m *tuiModel) submitInput() tea.Cmd {
 		return nil
 	}
 	if m.agent.shouldTriggerNaturalLanguageMCPReload(text) {
-		m.busy = true
+		m.setRunBusy(runID, true)
 		m.notice = ""
 		m.stickToBottom = true
 		m.cursorLine = -1
@@ -1794,7 +1843,7 @@ func (m *tuiModel) submitInput() tea.Cmd {
 	sess.History = append(sess.History, userMsg)
 	_ = appendJSONL(sess.HistoryPath, userMsg)
 
-	m.busy = true
+	m.setRunBusy(runID, true)
 	m.notice = ""
 	m.stickToBottom = true
 	m.cursorLine = -1
@@ -1809,7 +1858,7 @@ func (m *tuiModel) runMCPReload(runID string) {
 	ctx := m.ctx
 
 	defer func() {
-		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{Busy: false}}
+		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{RunID: runID, Busy: false}}
 	}()
 
 	msg, err := agentRef.reloadMCP(ctx)
@@ -1833,7 +1882,7 @@ func (m *tuiModel) runTurn(runID string, userText string, baseHistory []llm.Mess
 	ctx := m.ctx
 
 	defer func() {
-		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{Busy: false}}
+		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{RunID: runID, Busy: false}}
 	}()
 
 	if shouldSetTitle && coord != nil {
@@ -2765,6 +2814,10 @@ func (m *tuiModel) renderLeftPanel(width int, height int) string {
 	if len(lines) > height {
 		lines = lines[:height]
 	}
+	contentW := max(0, width-1)
+	for i := range lines {
+		lines[i] = fitPanelLine(lines[i], contentW)
+	}
 	return style.Render(strings.Join(lines, "\n"))
 }
 
@@ -3009,6 +3062,10 @@ func (m *tuiModel) renderStatus(width int, height int) string {
 		}
 	}
 	lines = append(lines, hint)
+	contentW := max(0, width-1)
+	for i := range lines {
+		lines[i] = fitPanelLine(lines[i], contentW)
+	}
 	return style.Render(strings.Join(lines, "\n"))
 }
 
@@ -3020,7 +3077,7 @@ func (m *tuiModel) renderCenter(width int, height int) string {
 
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 	headerText := appinfo.Display()
-	if m.busy && strings.TrimSpace(m.spinner()) != "" {
+	if m.currentRunBusy() && strings.TrimSpace(m.spinner()) != "" {
 		headerText += " " + m.spinner()
 	}
 	header := headerStyle.Render(headerText)
@@ -3099,7 +3156,7 @@ func (m *tuiModel) renderGatewayLine(width int) string {
 }
 
 func (m *tuiModel) renderInputLine(width int) string {
-	if m.busy {
+	if m.currentRunBusy() {
 		m.input.Blur()
 		thinking := "Thinking"
 		if strings.TrimSpace(m.spinner()) != "" {
@@ -3197,6 +3254,21 @@ func truncateANSI(s string, width int) string {
 		b.WriteString(ansiReset)
 	}
 	return b.String()
+}
+
+func fitPanelLine(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	if strings.TrimSpace(s) == "" {
+		return strings.Repeat(" ", width)
+	}
+	out := truncateANSI(s, width)
+	w := lipgloss.Width(out)
+	if w >= width {
+		return out
+	}
+	return out + strings.Repeat(" ", width-w)
 }
 
 func safeOneLine(s string, maxChars int) string {
