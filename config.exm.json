@@ -78,6 +78,9 @@
     }
   },
   "multi_agent": {
+    "worker": {
+      "max_turns": 40
+    },
     "cleanup": {
       "enabled": true,
       "mode": "archive",
@@ -88,5 +91,5 @@
       "dry_run": false
     }
   },
-  "notes": "start_params: default CLI args for `agent master` / `agent slave` when you don't pass flags.\n\nmax_tokens=0 means omit the parameter (provider default applies). Set a positive value to allow longer single responses if your provider defaults are small.\n\nauto_compaction: configure assistant.auto_compaction. Set enabled=false to disable. max_attempts can be 0 to disable retry/summary (hard tool-result truncation still applies). Other numeric fields should be positive."
+  "notes": "start_params: default CLI args for `agent master` / `agent slave` when you don't pass flags.\n\nmax_tokens=0 means omit the parameter (provider default applies). Set a positive value to allow longer single responses if your provider defaults are small.\n\nmulti_agent.worker.max_turns: child-agent worker max turns (acts as an upper bound). If agent_spawn sets a higher max_turns, it will be capped. Set a positive value (default: 40).\n\nauto_compaction: configure assistant.auto_compaction. Set enabled=false to disable. max_attempts can be 0 to disable retry/summary (hard tool-result truncation still applies). Other numeric fields should be positive."
 }

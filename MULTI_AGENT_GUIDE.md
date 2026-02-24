@@ -111,6 +111,23 @@ worker 在结束时会自动向 run-level signals 发布 `agent_finished`（payl
 - `hard_max_tool_result_chars`: tool 输出硬截断上限（字符）。
 - `overflow_max_tool_result_chars`: overflow 恢复时更激进的 tool 截断上限（字符）。
 
+## 6.2 子 Agent 最大回合数上限（max_turns）
+
+子 Agent worker 的最大回合数上限可在 `config.json` 配置：
+
+- 当 `agent_spawn` 未显式传 `max_turns` 时：使用该值作为默认上限。
+- 当 `agent_spawn` 传了更大的 `max_turns` 时：会被该值 cap 住。
+
+```json
+{
+  "multi_agent": {
+    "worker": {
+      "max_turns": 40
+    }
+  }
+}
+```
+
 ## 7. 清理/归档建议
 
 `.multi_agent/runs` 会随着运行次数增多而变大/变乱，通常不需要长期保留所有 run。

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -154,6 +155,25 @@ func (r *SlaveRegistry) Get(slaveID string) (*SlaveRecord, bool) {
 	return &cp, true
 }
 
+func (r *SlaveRegistry) Delete(slaveID string) (*SlaveRecord, bool) {
+	if r == nil {
+		return nil, false
+	}
+	id := strings.TrimSpace(slaveID)
+	if id == "" {
+		return nil, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec := r.slaves[id]
+	if rec == nil {
+		return nil, false
+	}
+	cp := *rec
+	delete(r.slaves, id)
+	return &cp, true
+}
+
 func (r *SlaveRegistry) Snapshot(onlyOnline bool) []SlaveInfo {
 	if r == nil {
 		return nil
@@ -172,4 +192,3 @@ func (r *SlaveRegistry) Snapshot(onlyOnline bool) []SlaveInfo {
 	}
 	return out
 }
-

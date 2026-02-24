@@ -407,8 +407,18 @@ func runWorker(args []string) error {
 		ag.AutoCompaction = patch.ApplyTo(ag.AutoCompaction)
 	}
 
+	maxTurns := spec.MaxTurns
+	if workerCfg, err := multiagent.LoadWorkerConfig(*configPath); err != nil {
+		fmt.Fprintln(os.Stderr, "warning:", err)
+	} else if workerCfg.MaxTurns != nil && *workerCfg.MaxTurns > 0 {
+		// Treat config as an upper bound to prevent runaway tool loops.
+		if maxTurns <= 0 || maxTurns > *workerCfg.MaxTurns {
+			maxTurns = *workerCfg.MaxTurns
+		}
+	}
+
 	result, runErr := ag.RunTask(context.Background(), spec.Task, agent.TaskOptions{
-		MaxTurns: spec.MaxTurns,
+		MaxTurns: maxTurns,
 		Hooks: agent.TaskHooks{
 			BeforeModelCall: func(ctx context.Context) ([]llm.Message, error) {
 				if err := ctl.Checkpoint(ctx, "before_model_call"); err != nil {
