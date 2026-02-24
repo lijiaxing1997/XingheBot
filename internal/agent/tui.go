@@ -128,6 +128,7 @@ type tuiModel struct {
 
 	loading            bool
 	busyRuns           map[string]bool
+	runTaskCancels     map[string]context.CancelFunc
 	notice             string
 	restartPending     bool
 	restartRequestedAt time.Time
@@ -276,6 +277,63 @@ func (m *tuiModel) setRunBusy(runID string, busy bool) {
 		return
 	}
 	delete(m.busyRuns, id)
+}
+
+func (m *tuiModel) startRunTaskContext(runID string) context.Context {
+	if m == nil {
+		return context.Background()
+	}
+	id := strings.TrimSpace(runID)
+	if id == "" {
+		if m.ctx != nil {
+			return m.ctx
+		}
+		return context.Background()
+	}
+	if m.runTaskCancels == nil {
+		m.runTaskCancels = make(map[string]context.CancelFunc)
+	}
+	if existing, ok := m.runTaskCancels[id]; ok && existing != nil {
+		existing()
+		delete(m.runTaskCancels, id)
+	}
+	parent := m.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	taskCtx, cancel := context.WithCancel(parent)
+	m.runTaskCancels[id] = cancel
+	return taskCtx
+}
+
+func (m *tuiModel) cancelRunTask(runID string) bool {
+	if m == nil || m.runTaskCancels == nil {
+		return false
+	}
+	id := strings.TrimSpace(runID)
+	if id == "" {
+		return false
+	}
+	cancel, ok := m.runTaskCancels[id]
+	if !ok || cancel == nil {
+		return false
+	}
+	cancel()
+	return true
+}
+
+func (m *tuiModel) clearRunTask(runID string) {
+	if m == nil || m.runTaskCancels == nil {
+		return
+	}
+	id := strings.TrimSpace(runID)
+	if id == "" {
+		return
+	}
+	if cancel, ok := m.runTaskCancels[id]; ok && cancel != nil {
+		cancel()
+	}
+	delete(m.runTaskCancels, id)
 }
 
 func (m *tuiModel) isRunBusy(runID string) bool {
@@ -691,7 +749,8 @@ func (m *tuiModel) maybeAutoFollowup() {
 	m.stickToBottom = true
 	m.cursorLine = -1
 	m.rerender()
-	go m.runAutoFollowup(runID, base, emailReply)
+	taskCtx := m.startRunTaskContext(runID)
+	go m.runAutoFollowup(taskCtx, runID, base, emailReply)
 }
 
 func (m *tuiModel) maybeProcessGatewayInbox() {
@@ -763,7 +822,8 @@ func (m *tuiModel) processGatewayEmail(in gateway.EmailInbound) {
 		References: in.References,
 	}
 	m.recordGatewayEmailContext(runID, in.From, replySubject, thread)
-	go m.runTurnEmail(runID, userText, base, replySubject, in.From, thread)
+	taskCtx := m.startRunTaskContext(runID)
+	go m.runTurnEmail(taskCtx, runID, userText, base, replySubject, in.From, thread)
 }
 
 func (m *tuiModel) recordGatewayEmailContext(runID string, replyTo string, replySubject string, thread gateway.EmailThreadContext) {
@@ -1188,10 +1248,10 @@ func (m *tuiModel) sendGatewayEmailReply(ctx context.Context, to string, subject
 	return nil
 }
 
-func (m *tuiModel) runTurnEmail(runID string, userText string, baseHistory []llm.Message, replySubject string, replyTo string, thread gateway.EmailThreadContext) {
+func (m *tuiModel) runTurnEmail(taskCtx context.Context, runID string, userText string, baseHistory []llm.Message, replySubject string, replyTo string, thread gateway.EmailThreadContext) {
 	events := m.events
 	agentRef := m.agent
-	ctx := m.ctx
+	ctx := taskCtx
 	gw := m.emailGateway
 
 	defer func() {
@@ -1235,6 +1295,10 @@ func (m *tuiModel) runTurnEmail(runID string, userText string, baseHistory []llm
 	}
 	err := runTUITurnStreaming(ctx, agentRef, runID, userTextForLLM, baseHistory, emit, afterTool)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			emit(llm.Message{Role: "system", Content: "Canceled."})
+			return
+		}
 		emit(llm.Message{Role: "system", Content: "ERROR: " + err.Error()})
 		if finalText == "" {
 			finalText = "ERROR: " + err.Error()
@@ -1526,10 +1590,10 @@ func anyStringSlice(v any) []string {
 	}
 }
 
-func (m *tuiModel) runAutoFollowup(runID string, baseHistory []llm.Message, emailReply *autoFollowupEmailReply) {
+func (m *tuiModel) runAutoFollowup(taskCtx context.Context, runID string, baseHistory []llm.Message, emailReply *autoFollowupEmailReply) {
 	events := m.events
 	agentRef := m.agent
-	ctx := m.ctx
+	ctx := taskCtx
 	gw := m.emailGateway
 
 	defer func() {
@@ -1554,7 +1618,12 @@ func (m *tuiModel) runAutoFollowup(runID string, baseHistory []llm.Message, emai
 		userText += "\n\nReply style requirements (must follow):\n" + style
 	}
 	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit, nil); err != nil {
-		emit(llm.Message{Role: "system", Content: "ERROR: " + err.Error()})
+		if errors.Is(err, context.Canceled) {
+			emit(llm.Message{Role: "system", Content: "Canceled."})
+			return
+		} else {
+			emit(llm.Message{Role: "system", Content: "ERROR: " + err.Error()})
+		}
 	}
 
 	if emailReply == nil || gw == nil {
@@ -1605,6 +1674,9 @@ func (m *tuiModel) handleAsyncEvent(evt tea.Msg) {
 			runID = m.currentRunID()
 		}
 		m.setRunBusy(runID, msg.Busy)
+		if !msg.Busy {
+			m.clearRunTask(runID)
+		}
 		if !m.anyBusy() {
 			m.maybeProcessGatewayInbox()
 		}
@@ -1639,10 +1711,29 @@ func (m *tuiModel) handleAsyncEvent(evt tea.Msg) {
 
 func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	key := msg.String()
+	typing := !m.currentRunBusy() && m.currentAgentID() == tuiPrimaryAgentID
 	switch key {
 	case "ctrl+c":
 		return true, tea.Quit
 	case "ctrl+e":
+		if m.currentAgentID() == tuiPrimaryAgentID {
+			runID := strings.TrimSpace(m.currentRunID())
+			if runID == "" {
+				return true, nil
+			}
+			if !m.isRunBusy(runID) {
+				m.notice = "No running task to cancel."
+				m.rerender()
+				return true, nil
+			}
+			if m.cancelRunTask(runID) {
+				m.notice = "Cancel requested."
+			} else {
+				m.notice = "Cancel requested (missing task handle)."
+			}
+			m.rerender()
+			return true, nil
+		}
 		m.forceKillCurrentSubagent()
 		return true, nil
 	case "ctrl+r":
@@ -1686,16 +1777,40 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	case "shift+down", "alt+down":
 		m.selectSession(1)
 		return true, nil
-	case "up", "k":
+	case "up":
 		m.moveCursor(-1)
 		return true, nil
-	case "down", "j":
+	case "k":
+		if typing {
+			return false, nil
+		}
+		m.moveCursor(-1)
+		return true, nil
+	case "down":
 		m.moveCursor(1)
 		return true, nil
-	case "left", "pgup":
+	case "j":
+		if typing {
+			return false, nil
+		}
+		m.moveCursor(1)
+		return true, nil
+	case "pgup":
 		m.pageCursor(-1)
 		return true, nil
-	case "right", "pgdown":
+	case "left":
+		if typing {
+			return false, nil
+		}
+		m.pageCursor(-1)
+		return true, nil
+	case "pgdown":
+		m.pageCursor(1)
+		return true, nil
+	case "right":
+		if typing {
+			return false, nil
+		}
 		m.pageCursor(1)
 		return true, nil
 	case "enter":
@@ -2250,7 +2365,8 @@ func (m *tuiModel) submitInput() tea.Cmd {
 		m.stickToBottom = true
 		m.cursorLine = -1
 		m.rerender()
-		go m.runMCPReload(runID)
+		taskCtx := m.startRunTaskContext(runID)
+		go m.runMCPReload(taskCtx, runID)
 		return nil
 	}
 	if m.agent.shouldTriggerNaturalLanguageMCPReload(text) {
@@ -2259,7 +2375,8 @@ func (m *tuiModel) submitInput() tea.Cmd {
 		m.stickToBottom = true
 		m.cursorLine = -1
 		m.rerender()
-		go m.runMCPReload(runID)
+		taskCtx := m.startRunTaskContext(runID)
+		go m.runMCPReload(taskCtx, runID)
 		return nil
 	}
 
@@ -2278,14 +2395,15 @@ func (m *tuiModel) submitInput() tea.Cmd {
 	m.stickToBottom = true
 	m.cursorLine = -1
 	m.rerender()
-	go m.runTurn(runID, text, base, shouldSetTitle)
+	taskCtx := m.startRunTaskContext(runID)
+	go m.runTurn(taskCtx, runID, text, base, shouldSetTitle)
 	return nil
 }
 
-func (m *tuiModel) runMCPReload(runID string) {
+func (m *tuiModel) runMCPReload(taskCtx context.Context, runID string) {
 	events := m.events
 	agentRef := m.agent
-	ctx := m.ctx
+	ctx := taskCtx
 
 	defer func() {
 		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{RunID: runID, Busy: false}}
@@ -2293,23 +2411,27 @@ func (m *tuiModel) runMCPReload(runID string) {
 
 	msg, err := agentRef.reloadMCP(ctx)
 	content := msg
-	if err != nil {
+	switch {
+	case err == nil:
+	case errors.Is(err, context.Canceled):
+		content = "Canceled."
+	default:
 		content = "MCP reload failed: " + err.Error()
 	}
 	events <- tuiAsyncMsg{Event: tuiAppendHistoryMsg{
 		RunID: runID,
 		Msg:   llm.Message{Role: "system", Content: content},
 	}}
-	if err != nil {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		events <- tuiAsyncMsg{Event: tuiSetNoticeMsg{Text: err.Error()}}
 	}
 }
 
-func (m *tuiModel) runTurn(runID string, userText string, baseHistory []llm.Message, shouldSetTitle bool) {
+func (m *tuiModel) runTurn(taskCtx context.Context, runID string, userText string, baseHistory []llm.Message, shouldSetTitle bool) {
 	events := m.events
 	agentRef := m.agent
 	coord := m.coord
-	ctx := m.ctx
+	ctx := taskCtx
 
 	defer func() {
 		events <- tuiAsyncMsg{Event: tuiSetBusyMsg{RunID: runID, Busy: false}}
@@ -2333,7 +2455,11 @@ func (m *tuiModel) runTurn(runID string, userText string, baseHistory []llm.Mess
 		return m.maybeBuildWaitCompletionSystemMessages(runID, call, result, callErr)
 	}
 	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit, afterTool); err != nil {
-		emit(llm.Message{Role: "system", Content: "ERROR: " + err.Error()})
+		if errors.Is(err, context.Canceled) {
+			emit(llm.Message{Role: "system", Content: "Canceled."})
+		} else {
+			emit(llm.Message{Role: "system", Content: "ERROR: " + err.Error()})
+		}
 	}
 }
 
@@ -3517,7 +3643,7 @@ func (m *tuiModel) renderStatus(width int, height int) string {
 	hints := []string{
 		hintStyle.Render("TAB: switch agent"),
 		hintStyle.Render("Ctrl+T: toggle finished"),
-		hintStyle.Render("Ctrl+E: kill sub-agent"),
+		hintStyle.Render("Ctrl+E: cancel (primary) / kill (sub)"),
 	}
 	for i := range hints {
 		hints[i] = truncateANSI(hints[i], width-1)
