@@ -18,6 +18,7 @@ type InitOptions struct {
 	ConfigPath    string
 	MCPConfigPath string
 	SkillsDir     string
+	Role          string
 }
 
 type InitReport struct {
@@ -58,6 +59,7 @@ func Init(opts InitOptions) (InitReport, error) {
 	tr := tar.NewReader(gzr)
 
 	var configTemplate []byte
+	var slaveConfigTemplate []byte
 	var mcpTemplate []byte
 
 	if err := os.MkdirAll(report.SkillsDir, 0o755); err != nil {
@@ -90,6 +92,13 @@ func Init(opts InitOptions) (InitReport, error) {
 			}
 			configTemplate = b
 			continue
+		case "templates/slave-config.json":
+			b, err := io.ReadAll(io.LimitReader(tr, hdr.Size))
+			if err != nil {
+				return report, err
+			}
+			slaveConfigTemplate = b
+			continue
 		case "templates/mcp.json":
 			b, err := io.ReadAll(io.LimitReader(tr, hdr.Size))
 			if err != nil {
@@ -106,7 +115,12 @@ func Init(opts InitOptions) (InitReport, error) {
 		}
 	}
 
-	if err := writeTemplateFile(report.ConfigPath, 0o600, configTemplate, &report); err != nil {
+	role := strings.ToLower(strings.TrimSpace(opts.Role))
+	selectedConfigTemplate := configTemplate
+	if role == "slave" && len(slaveConfigTemplate) > 0 {
+		selectedConfigTemplate = slaveConfigTemplate
+	}
+	if err := writeTemplateFile(report.ConfigPath, 0o600, selectedConfigTemplate, &report); err != nil {
 		return report, err
 	}
 	if err := writeTemplateFile(report.MCPConfigPath, 0o644, mcpTemplate, &report); err != nil {

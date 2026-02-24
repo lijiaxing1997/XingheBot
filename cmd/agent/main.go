@@ -208,7 +208,7 @@ func runChat(args []string) error {
 
 	resolvedSkillsDir := resolvePath(*skillsDir)
 	if *initFlag {
-		return runInit(*configPath, *mcpConfigPath, resolvedSkillsDir)
+		return runInit("chat", *configPath, *mcpConfigPath, resolvedSkillsDir)
 	}
 	controlPlaneOnly := true
 	if strings.EqualFold(strings.TrimSpace(*chatToolMode), string(agent.ChatToolModeFull)) {

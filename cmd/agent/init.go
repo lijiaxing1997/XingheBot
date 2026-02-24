@@ -9,11 +9,12 @@ import (
 	"test_skill_agent/internal/bootstrap"
 )
 
-func runInit(configPath string, mcpConfigPath string, skillsDir string) error {
+func runInit(role string, configPath string, mcpConfigPath string, skillsDir string) error {
 	report, err := bootstrap.Init(bootstrap.InitOptions{
 		ConfigPath:    configPath,
 		MCPConfigPath: mcpConfigPath,
 		SkillsDir:     skillsDir,
+		Role:          role,
 	})
 	if err != nil {
 		return err

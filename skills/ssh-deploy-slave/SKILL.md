@@ -48,7 +48,7 @@ metadata:
 
 Slave 节点必须有自己的 LLM 配置（至少包含 `model_config.api_key/base_url/model`），并且必须包含与 Master 相同的 `cluster.secret`。
 
-推荐从 `config.exm.json` 复制出一个 **最小化** 的 `slave-config.json`，重点字段：
+推荐直接使用 `agent slave --init` 生成的 **最小化** `slave-config.json` 模板（或从 `slave-config.exm.json` 复制），重点字段：
 
 - `model_config.api_key`：Slave 自己的 key（不要复用 Master，除非你确认风险）
 - `model_config.base_url/model/max_tokens`：按你的 provider 填

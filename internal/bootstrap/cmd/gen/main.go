@@ -95,6 +95,11 @@ func buildBundle(root string) ([]byte, error) {
 		_ = gzw.Close()
 		return nil, err
 	}
+	if err := addFile(tw, filepath.Join(root, "slave-config.exm.json"), "templates/slave-config.json", 0o644, fixedTime); err != nil {
+		_ = tw.Close()
+		_ = gzw.Close()
+		return nil, err
+	}
 	if err := addFile(tw, filepath.Join(root, "mcp.exm.json"), "templates/mcp.json", 0o644, fixedTime); err != nil {
 		_ = tw.Close()
 		_ = gzw.Close()

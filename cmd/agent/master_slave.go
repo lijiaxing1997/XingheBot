@@ -40,7 +40,7 @@ func runMaster(args []string) error {
 
 	resolvedSkillsDir := resolvePath(*skillsDir)
 	if *initFlag {
-		return runInit(*configPath, *mcpConfigPath, resolvedSkillsDir)
+		return runInit("master", *configPath, *mcpConfigPath, resolvedSkillsDir)
 	}
 
 	seen := map[string]bool{}
@@ -279,7 +279,7 @@ func runSlave(args []string) error {
 
 	resolvedSkillsDir := resolvePath(*skillsDir)
 	if *initFlag {
-		return runInit(*configPath, *mcpConfigPath, resolvedSkillsDir)
+		return runInit("slave", *configPath, *mcpConfigPath, resolvedSkillsDir)
 	}
 
 	seen := map[string]bool{}

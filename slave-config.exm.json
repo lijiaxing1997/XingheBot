@@ -1,0 +1,65 @@
+{
+  "model_config": {
+    "api_key": "sk-apikey-REPLACE_ME",
+    "base_url": "https://api.deepseek.com-REPLACE_ME",
+    "model": "deepseek-chat-REPLACE_ME",
+    "max_tokens": 0
+  },
+  "web_search": {
+    "tavily_api_key": "tvly-REPLACE_ME"
+  },
+  "assistant": {
+    "reply_style": {
+      "enabled": true,
+      "md_path": "reply_style.md"
+    },
+    "auto_compaction": {
+      "enabled": true,
+      "max_attempts": 3,
+      "keep_last_user_turns": 6,
+      "summary_max_tokens": 512,
+      "summary_max_chars": 6000,
+      "summary_input_max_chars": 16000,
+      "hard_max_tool_result_chars": 400000,
+      "overflow_max_tool_result_chars": 50000
+    }
+  },
+  "start_params": {
+    "slave": {
+      "master": "ws://MASTER_IP:7788/ws",
+      "heartbeat": "5s",
+      "max_inflight_runs": 1,
+      "insecure_skip_verify": false
+    }
+  },
+  "cluster": {
+    "secret": "",
+    "tls": {
+      "enabled": false,
+      "cert_file": "",
+      "key_file": "",
+      "insecure_skip_verify": false
+    },
+    "files": {
+      "root_dir": ".cluster/files",
+      "max_file_bytes": 2147483648,
+      "max_total_bytes": 21474836480,
+      "retention_days": 7,
+      "chunk_size_bytes": 262144,
+      "max_inflight_chunks": 8
+    }
+  },
+  "multi_agent": {
+    "cleanup": {
+      "enabled": true,
+      "mode": "archive",
+      "interval_minutes": 10,
+      "archive_after_minutes": 60,
+      "keep_last": 20,
+      "include_failed": false,
+      "dry_run": false
+    }
+  },
+  "notes": "This is a minimal slave config template.\n\nRequired:\n- model_config.api_key\n- cluster.secret (copy from the master config after master starts)\n\nstart_params.slave.master is recommended so you can start the slave with: `agent slave --config slave-config.json`.\n\nmax_tokens=0 means omit the parameter (provider default applies)."
+}
+
