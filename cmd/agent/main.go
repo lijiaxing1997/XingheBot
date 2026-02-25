@@ -13,6 +13,7 @@ import (
 
 	"test_skill_agent/internal/agent"
 	"test_skill_agent/internal/appinfo"
+	"test_skill_agent/internal/autonomy/cronrunner"
 	"test_skill_agent/internal/llm"
 	"test_skill_agent/internal/mcpclient"
 	"test_skill_agent/internal/memory"
@@ -590,6 +591,33 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	if strings.TrimSpace(os.Getenv("MULTI_AGENT_AGENT_ID")) == "" {
 		go memory.RunAutoDailySummaryLoop(cleanupCtx, client, opts.ConfigPath, workDir)
 	}
+
+	var cronRun *cronrunner.Runner
+	if strings.TrimSpace(os.Getenv("MULTI_AGENT_AGENT_ID")) == "" {
+		if runner, err := cronrunner.Start(cleanupCtx, cronrunner.RunnerOptions{
+			Client:      client,
+			ConfigPath:  opts.ConfigPath,
+			SkillsDir:   opts.SkillsDir,
+			WorkDir:     workDir,
+			Temperature: float32(opts.Temperature),
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "warning:", err)
+		} else if runner != nil {
+			cronRun = runner
+		}
+	}
+
+	wakeCron := func() {}
+	if cronRun != nil {
+		wakeCron = cronRun.Wake
+	}
+	registry.Register(&tools.CronListTool{ConfigPath: opts.ConfigPath})
+	registry.Register(&tools.CronGetTool{ConfigPath: opts.ConfigPath})
+	registry.Register(&tools.CronUpsertTool{ConfigPath: opts.ConfigPath, Wake: wakeCron})
+	registry.Register(&tools.CronDeleteTool{ConfigPath: opts.ConfigPath, Wake: wakeCron})
+	registry.Register(&tools.CronEnableTool{ConfigPath: opts.ConfigPath, Enabled: true, Wake: wakeCron})
+	registry.Register(&tools.CronEnableTool{ConfigPath: opts.ConfigPath, Enabled: false, Wake: wakeCron})
+	registry.Register(&tools.CronRunNowTool{ConfigPath: opts.ConfigPath, Wake: wakeCron})
 
 	registry.Register(&tools.AgentRunCreateTool{Coordinator: coord})
 	registry.Register(&tools.AgentRunListTool{Coordinator: coord})

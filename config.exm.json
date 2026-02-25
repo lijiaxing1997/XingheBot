@@ -45,6 +45,29 @@
       "patterns": ["sk-", "tvly-", "AKIA", "-----BEGIN", "authorization_code"]
     }
   },
+  "autonomy": {
+    "enabled": false,
+    "heartbeat": {
+      "enabled": false,
+      "every": "30m",
+      "coalesce_ms": 250,
+      "retry_ms": 1000,
+      "path": "HEARTBEAT.md",
+      "ok_token": "HEARTBEAT_OK",
+      "dedupe_hours": 24
+    },
+    "cron": {
+      "enabled": false,
+      "store_path": "",
+      "default_timezone": "Local",
+      "max_timer_delay": "60s",
+      "default_timeout": "10m",
+      "stuck_run": "2h",
+      "min_refire_gap": "2s",
+      "email_to": "REPLACE_ME@example.com",
+      "email_subject_prefix": "[Cron]"
+    }
+  },
   "start_params": {
     "master": {
       "listen": "0.0.0.0:7788",

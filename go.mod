@@ -12,6 +12,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.3.0
 	github.com/openai/openai-go/v3 v3.22.0
 	github.com/redis/go-redis/v9 v9.18.0
+	github.com/robfig/cron/v3 v3.0.1
 	golang.org/x/term v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
 	nhooyr.io/websocket v1.8.17
