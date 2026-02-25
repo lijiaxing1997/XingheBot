@@ -254,6 +254,7 @@ func runMaster(args []string) error {
 	if err != nil {
 		return err
 	}
+	ag.ConfigPath = *configPath
 	ag.SetPromptMode(agent.PromptModeChat)
 	ag.SetChatToolMode(agent.ChatToolMode(*chatToolMode))
 	ag.Temperature = float32(*temperature)
@@ -464,6 +465,7 @@ func runSlave(args []string) error {
 			if err != nil {
 				return nil, err
 			}
+			a.ConfigPath = *configPath
 			a.SetPromptMode(agent.PromptModeChat)
 			a.SetChatToolMode(agent.ChatToolModeDispatcher)
 			a.Temperature = float32(*temperature)
@@ -716,7 +718,28 @@ func appendJSONLLine(path string, payload any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.Marshal(payload)
+	encoded := payload
+	switch v := payload.(type) {
+	case llm.Message:
+		encoded = struct {
+			llm.Message
+			TS string `json:"ts,omitempty"`
+		}{
+			Message: v,
+			TS:      time.Now().UTC().Format(time.RFC3339Nano),
+		}
+	case *llm.Message:
+		if v != nil {
+			encoded = struct {
+				llm.Message
+				TS string `json:"ts,omitempty"`
+			}{
+				Message: *v,
+				TS:      time.Now().UTC().Format(time.RFC3339Nano),
+			}
+		}
+	}
+	data, err := json.Marshal(encoded)
 	if err != nil {
 		return err
 	}

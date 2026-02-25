@@ -23,6 +23,9 @@ func TestAppendSearchGetRoundtrip(t *testing.T) {
 	if appendResp.Path != "daily/2026-02-24.md" {
 		t.Fatalf("unexpected append path: %q", appendResp.Path)
 	}
+	if !appendResp.Appended {
+		t.Fatalf("expected appended=true, got false")
+	}
 	if strings.Contains(appendResp.Line, "sk-1234567890abcdef") {
 		t.Fatalf("expected secret to be redacted, got: %q", appendResp.Line)
 	}
@@ -47,6 +50,42 @@ func TestAppendSearchGetRoundtrip(t *testing.T) {
 	}
 	if strings.Contains(getResp.Text, "sk-1234567890abcdef") {
 		t.Fatalf("expected stored content to be redacted, got: %q", getResp.Text)
+	}
+}
+
+func TestAppendDailySkipsDuplicate(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig().WithDefaults()
+	ctx := context.Background()
+
+	now1 := time.Date(2026, 2, 24, 10, 12, 33, 0, time.UTC)
+	first, err := AppendDaily(ctx, cfg, root, "pref", "Call the user 老板.", []string{"prefs"}, "test", now1)
+	if err != nil {
+		t.Fatalf("AppendDaily(first): %v", err)
+	}
+	if !first.Appended {
+		t.Fatalf("expected first append")
+	}
+
+	now2 := now1.Add(2 * time.Minute)
+	second, err := AppendDaily(ctx, cfg, root, "pref", "Call the user 老板.", []string{"prefs"}, "test2", now2)
+	if err != nil {
+		t.Fatalf("AppendDaily(second): %v", err)
+	}
+	if second.Appended {
+		t.Fatalf("expected duplicate to be skipped")
+	}
+	if !second.Duplicate {
+		t.Fatalf("expected duplicate=true")
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(first.Path)))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d: %q", len(lines), string(data))
 	}
 }
 

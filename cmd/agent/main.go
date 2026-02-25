@@ -15,6 +15,7 @@ import (
 	"test_skill_agent/internal/appinfo"
 	"test_skill_agent/internal/llm"
 	"test_skill_agent/internal/mcpclient"
+	"test_skill_agent/internal/memory"
 	"test_skill_agent/internal/multiagent"
 	"test_skill_agent/internal/restart"
 	"test_skill_agent/internal/skills"
@@ -259,6 +260,7 @@ func runChat(args []string) error {
 		closeRuntime()
 		return err
 	}
+	ag.ConfigPath = *configPath
 	ag.SetPromptMode(agent.PromptModeChat)
 	ag.SetChatToolMode(agent.ChatToolMode(*chatToolMode))
 	ag.Temperature = float32(*temperature)
@@ -395,6 +397,7 @@ func runWorker(args []string) error {
 		_ = ctl.Finish("", err)
 		return err
 	}
+	ag.ConfigPath = *configPath
 	ag.SetPromptMode(agent.PromptModeWorker)
 	ag.Temperature = float32(*temperature)
 	if spec.Temperature != nil {
@@ -563,6 +566,11 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 		return nil, err
 	}
 	workDir, _ := os.Getwd()
+
+	// Background: daily rollup summary from sessions -> daily/*.md (skip child workers).
+	if strings.TrimSpace(os.Getenv("MULTI_AGENT_AGENT_ID")) == "" {
+		go memory.RunAutoDailySummaryLoop(cleanupCtx, client, opts.ConfigPath, workDir)
+	}
 
 	registry.Register(&tools.AgentRunCreateTool{Coordinator: coord})
 	registry.Register(&tools.AgentRunListTool{Coordinator: coord})

@@ -131,6 +131,7 @@ type tuiModel struct {
 	busyRuns           map[string]bool
 	runTaskCancels     map[string]context.CancelFunc
 	notice             string
+	noticeIsError      bool
 	restartPending     bool
 	restartRequestedAt time.Time
 	banner             string
@@ -167,6 +168,7 @@ type tuiSessionCreatedMsg struct {
 
 type tuiSessionCapturedMsg struct {
 	RunID         string
+	Root          string
 	Path          string
 	FlushPath     string
 	FlushAppended int
@@ -469,6 +471,7 @@ func tuiCaptureSessionToMemoryCmd(ctx context.Context, coord *multiagent.Coordin
 		}
 		return tuiSessionCapturedMsg{
 			RunID:         id,
+			Root:          strings.TrimSpace(paths.RootDir),
 			Path:          strings.TrimSpace(out.Path),
 			FlushPath:     strings.TrimSpace(out.FlushPath),
 			FlushAppended: out.FlushAppended,
@@ -482,6 +485,34 @@ func tuiDeleteSessionCmd(coord *multiagent.Coordinator, runID string) tea.Cmd {
 		err := coord.DeleteRun(runID)
 		return tuiSessionDeletedMsg{RunID: runID, Err: err}
 	}
+}
+
+func (m *tuiModel) clearNotice() {
+	if m == nil {
+		return
+	}
+	m.notice = ""
+	m.noticeIsError = false
+}
+
+func (m *tuiModel) setNotice(text string) {
+	if m == nil {
+		return
+	}
+	m.notice = strings.TrimSpace(text)
+	m.noticeIsError = false
+}
+
+func (m *tuiModel) setNoticeError(text string) {
+	if m == nil {
+		return
+	}
+	m.notice = strings.TrimSpace(text)
+	if m.notice == "" {
+		m.noticeIsError = false
+		return
+	}
+	m.noticeIsError = true
 }
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -570,7 +601,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiSessionCreatedMsg:
 		prevRunID := m.currentRunID()
 		if msg.Err != nil {
-			m.notice = msg.Err.Error()
+			m.setNoticeError(msg.Err.Error())
 			return m, nil
 		}
 		m.sessions = append([]multiagent.RunManifest{msg.Run}, m.sessions...)
@@ -579,7 +610,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ensureSessionLoaded(m.currentRunID())
 		m.createPrimaryAgent(m.currentRunID())
 		m.refreshAgentIDs()
-		m.notice = ""
+		m.clearNotice()
 		m.rerender()
 		if strings.TrimSpace(prevRunID) != "" && strings.TrimSpace(prevRunID) != strings.TrimSpace(msg.Run.ID) {
 			return m, tuiCaptureSessionToMemoryCmd(m.ctx, m.coord, m.gatewayConfigPath, prevRunID)
@@ -591,7 +622,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tuiSessionDeletedMsg:
 		if msg.Err != nil {
-			m.notice = msg.Err.Error()
+			m.setNoticeError(msg.Err.Error())
 			return m, nil
 		}
 		deletedID := strings.TrimSpace(msg.RunID)
@@ -620,7 +651,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.deleteConfirmRunID = ""
 		m.deleteConfirmAt = time.Time{}
-		m.notice = ""
+		m.clearNotice()
 
 		if len(m.sessions) == 0 {
 			m.sessionIndex = 0
@@ -788,7 +819,7 @@ func (m *tuiModel) maybeAutoFollowup() {
 		})
 	}
 	if _, err := m.coord.MarkAgentResultsReported(runID, reports, now); err != nil {
-		m.notice = err.Error()
+		m.setNoticeError(err.Error())
 	}
 
 	base := append([]llm.Message(nil), sess.History...)
@@ -799,7 +830,7 @@ func (m *tuiModel) maybeAutoFollowup() {
 		}
 	}
 	m.setRunBusy(runID, true)
-	m.notice = ""
+	m.clearNotice()
 	m.stickToBottom = true
 	m.cursorLine = -1
 	m.rerender()
@@ -837,7 +868,7 @@ func (m *tuiModel) processGatewayEmail(in gateway.EmailInbound) {
 	}
 	runID, err := m.ensureEmailSession(subjectKey)
 	if err != nil {
-		m.notice = err.Error()
+		m.setNoticeError(err.Error())
 		m.rerender()
 		return
 	}
@@ -855,7 +886,7 @@ func (m *tuiModel) processGatewayEmail(in gateway.EmailInbound) {
 	m.createPrimaryAgent(runID)
 	sess := m.sessionData[runID]
 	if sess == nil {
-		m.notice = "failed to load session"
+		m.setNoticeError("failed to load session")
 		m.rerender()
 		return
 	}
@@ -866,7 +897,7 @@ func (m *tuiModel) processGatewayEmail(in gateway.EmailInbound) {
 	_ = appendJSONL(sess.HistoryPath, userMsg)
 
 	m.setRunBusy(runID, true)
-	m.notice = ""
+	m.clearNotice()
 	m.stickToBottom = true
 	m.cursorLine = -1
 	m.rerender()
@@ -922,7 +953,7 @@ func (m *tuiModel) recordGatewayEmailContext(runID string, replyTo string, reply
 		return nil
 	})
 	if err != nil {
-		m.notice = err.Error()
+		m.setNoticeError(err.Error())
 		return
 	}
 	for i := range m.sessions {
@@ -1847,12 +1878,12 @@ func (m *tuiModel) handleAsyncEvent(evt tea.Msg) {
 			m.maybeProcessGatewayInbox()
 		}
 	case tuiSetNoticeMsg:
-		m.notice = strings.TrimSpace(msg.Text)
+		m.setNoticeError(msg.Text)
 	case tuiSessionCapturedMsg:
 		m.applySessionCaptureResult(msg)
 	case tuiRunManifestUpdatedMsg:
 		if msg.Err != nil {
-			m.notice = strings.TrimSpace(msg.Err.Error())
+			m.setNoticeError(msg.Err.Error())
 			return
 		}
 		id := strings.TrimSpace(msg.RunID)
@@ -1879,14 +1910,26 @@ func (m *tuiModel) handleAsyncEvent(evt tea.Msg) {
 
 func (m *tuiModel) applySessionCaptureResult(msg tuiSessionCapturedMsg) {
 	if msg.Err != nil {
-		m.notice = strings.TrimSpace(msg.Err.Error())
+		m.setNoticeError(msg.Err.Error())
 		return
 	}
-	if errText := strings.TrimSpace(msg.FlushError); errText != "" {
-		m.notice = "Long-term memory flush after session capture failed: " + errText
+	root := strings.TrimSpace(msg.Root)
+	capturePath := strings.TrimSpace(msg.Path)
+	captureDisplay := capturePath
+	if capturePath != "" && root != "" {
+		captureDisplay = filepath.Join(root, filepath.FromSlash(capturePath))
 	}
-	if capturePath := strings.TrimSpace(msg.Path); capturePath != "" {
-		m.notice = "Captured previous session to long-term memory: " + capturePath
+
+	if errText := strings.TrimSpace(msg.FlushError); errText != "" {
+		if captureDisplay != "" {
+			m.setNoticeError("Long-term memory flush after session capture failed: " + errText + " (capture=" + captureDisplay + ")")
+		} else {
+			m.setNoticeError("Long-term memory flush after session capture failed: " + errText)
+		}
+		return
+	}
+	if captureDisplay != "" {
+		m.setNotice("Captured previous session to long-term memory: " + captureDisplay)
 	}
 	if msg.FlushAppended <= 0 {
 		return
@@ -1929,14 +1972,14 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 				return true, nil
 			}
 			if !m.isRunBusy(runID) {
-				m.notice = "No running task to cancel."
+				m.setNotice("No running task to cancel.")
 				m.rerender()
 				return true, nil
 			}
 			if m.cancelRunTask(runID) {
-				m.notice = "Cancel requested."
+				m.setNotice("Cancel requested.")
 			} else {
-				m.notice = "Cancel requested (missing task handle)."
+				m.setNotice("Cancel requested (missing task handle).")
 			}
 			m.rerender()
 			return true, nil
@@ -1955,12 +1998,12 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		if strings.TrimSpace(m.deleteConfirmRunID) == runID && !m.deleteConfirmAt.IsZero() && time.Since(m.deleteConfirmAt) < 3*time.Second {
 			m.deleteConfirmRunID = ""
 			m.deleteConfirmAt = time.Time{}
-			m.notice = ""
+			m.clearNotice()
 			return true, tuiDeleteSessionCmd(m.coord, runID)
 		}
 		m.deleteConfirmRunID = runID
 		m.deleteConfirmAt = time.Now().UTC()
-		m.notice = "Press Ctrl+D again to delete this session."
+		m.setNotice("Press Ctrl+D again to delete this session.")
 		m.rerender()
 		return true, nil
 	case "tab":
@@ -2020,7 +2063,7 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		return true, nil
 	case "enter":
 		if m.sessionCursor == -1 {
-			m.notice = ""
+			m.clearNotice()
 			return true, tuiCreateSessionCmd(m.coord)
 		}
 		if m.currentAgentID() != tuiPrimaryAgentID {
@@ -2028,7 +2071,7 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 				m.toggleToolAtCursor()
 				return true, nil
 			}
-			m.notice = "Sub-agent view is read-only. Press TAB to return to primary chat."
+			m.setNotice("Sub-agent view is read-only. Press TAB to return to primary chat.")
 			m.rerender()
 			return true, nil
 		}
@@ -2054,19 +2097,19 @@ func (m *tuiModel) forceKillCurrentSubagent() {
 	}
 	agentID := strings.TrimSpace(m.currentAgentID())
 	if agentID == "" || agentID == tuiPrimaryAgentID {
-		m.notice = "Select a sub-agent with TAB to kill it."
+		m.setNotice("Select a sub-agent with TAB to kill it.")
 		m.rerender()
 		return
 	}
 
 	state, err := m.coord.ReadAgentState(runID, agentID)
 	if err != nil {
-		m.notice = "Read agent state: " + err.Error()
+		m.setNoticeError("Read agent state: " + err.Error())
 		m.rerender()
 		return
 	}
 	if multiagent.IsTerminalStatus(state.Status) {
-		m.notice = "Agent already finished."
+		m.setNotice("Agent already finished.")
 		m.rerender()
 		return
 	}
@@ -2081,7 +2124,7 @@ func (m *tuiModel) forceKillCurrentSubagent() {
 		CreatedAt: now,
 	})
 	if cmdErr != nil {
-		m.notice = "Queue cancel: " + cmdErr.Error()
+		m.setNoticeError("Queue cancel: " + cmdErr.Error())
 		m.rerender()
 		return
 	}
@@ -2096,14 +2139,14 @@ func (m *tuiModel) forceKillCurrentSubagent() {
 
 	pid := state.PID
 	if pid <= 0 {
-		m.notice = "Cancel queued. PID missing; process may not have started yet."
+		m.setNotice("Cancel queued. PID missing; process may not have started yet.")
 		m.agentIndex = 0
 		m.refreshAgentIDs()
 		m.rerender()
 		return
 	}
 	if pid == os.Getpid() {
-		m.notice = fmt.Sprintf("Cancel queued. Refusing to kill current process (pid=%d).", pid)
+		m.setNotice(fmt.Sprintf("Cancel queued. Refusing to kill current process (pid=%d).", pid))
 		m.agentIndex = 0
 		m.refreshAgentIDs()
 		m.rerender()
@@ -2112,12 +2155,12 @@ func (m *tuiModel) forceKillCurrentSubagent() {
 
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		m.notice = "Find process: " + err.Error()
+		m.setNoticeError("Find process: " + err.Error())
 		m.rerender()
 		return
 	}
 	if err := proc.Kill(); err != nil {
-		m.notice = "Kill process: " + err.Error()
+		m.setNoticeError("Kill process: " + err.Error())
 		m.rerender()
 		return
 	}
@@ -2146,7 +2189,7 @@ func (m *tuiModel) forceKillCurrentSubagent() {
 		})
 	}
 
-	m.notice = fmt.Sprintf("Killed sub-agent %s (pid=%d).", agentID, pid)
+	m.setNotice(fmt.Sprintf("Killed sub-agent %s (pid=%d).", agentID, pid))
 	m.agentIndex = 0
 	m.refreshAgentIDs()
 	m.cursorLine = -1
@@ -2572,7 +2615,7 @@ func (m *tuiModel) submitInput() tea.Cmd {
 		return tea.Quit
 	case "/mcp reload", "/mcp-reload":
 		m.setRunBusy(runID, true)
-		m.notice = ""
+		m.clearNotice()
 		m.stickToBottom = true
 		m.cursorLine = -1
 		m.rerender()
@@ -2582,7 +2625,7 @@ func (m *tuiModel) submitInput() tea.Cmd {
 	}
 	if m.agent.shouldTriggerNaturalLanguageMCPReload(text) {
 		m.setRunBusy(runID, true)
-		m.notice = ""
+		m.clearNotice()
 		m.stickToBottom = true
 		m.cursorLine = -1
 		m.rerender()
@@ -2602,7 +2645,7 @@ func (m *tuiModel) submitInput() tea.Cmd {
 	_ = appendJSONL(sess.HistoryPath, userMsg)
 
 	m.setRunBusy(runID, true)
-	m.notice = ""
+	m.clearNotice()
 	m.stickToBottom = true
 	m.cursorLine = -1
 	m.rerender()
@@ -2772,7 +2815,7 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 		emit = func(llm.Message) {}
 	}
 
-	systemMsg := llm.Message{Role: "system", Content: a.SystemPrompt}
+	preamble := a.turnSystemPreamble(ctx)
 	sessionMsg := llm.Message{
 		Role: "system",
 		Content: fmt.Sprintf(
@@ -2796,9 +2839,13 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 	}
 
 	turnHistory := []llm.Message{{Role: "user", Content: userText}}
-	reqMessages := append([]llm.Message{}, systemMsg, sessionMsg)
+	reqMessages := append([]llm.Message{}, preamble...)
+	reqMessages = append(reqMessages, sessionMsg)
 	reqMessages = append(reqMessages, filterHistoryForModel(pruneHistoryAfterLastAutoCompaction(baseHistory))...)
 	reqMessages = append(reqMessages, turnHistory...)
+
+	toolRecords := make([]memory.ToolRecord, 0, 12)
+	finalAssistant := ""
 
 	didAutoFlush := false
 	for {
@@ -2862,6 +2909,7 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 		reqMessages = append(reqMessages, msg)
 
 		if len(msg.ToolCalls) == 0 {
+			finalAssistant = msg.Content
 			break
 		}
 
@@ -2870,6 +2918,15 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 			start := time.Now()
 			result, callErr := a.callToolWithPolicy(toolCtx, call, &policy)
 			_ = time.Since(start)
+			rec := memory.ToolRecord{
+				Name:      strings.TrimSpace(call.Function.Name),
+				Arguments: call.Function.Arguments,
+				Result:    result,
+			}
+			if callErr != nil {
+				rec.Error = callErr.Error()
+			}
+			toolRecords = append(toolRecords, rec)
 
 			toolMsg := llm.Message{
 				Role:       "tool",
@@ -2904,8 +2961,7 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 			if call.Function.Name == "skill_create" || call.Function.Name == "skill_install" {
 				_ = a.ReloadSkills()
 				a.SystemPrompt = a.buildSystemPrompt()
-				systemMsg = llm.Message{Role: "system", Content: a.SystemPrompt}
-				reqMessages = append(reqMessages, systemMsg)
+				reqMessages = append(reqMessages, llm.Message{Role: "system", Content: a.SystemPrompt})
 			}
 		}
 
@@ -2926,6 +2982,12 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 		}
 	}
 
+	a.queueMemoryMDUpdate(memoryMDUpdateJob{
+		RunID:          strings.TrimSpace(runID),
+		UserRequest:    userText,
+		AssistantFinal: strings.TrimSpace(finalAssistant),
+		ToolRecords:    toolRecords,
+	})
 	return nil
 }
 
@@ -3936,9 +3998,13 @@ func (m *tuiModel) renderCenter(width int, height int) string {
 	subHeader := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(fmt.Sprintf("Session: %s | Agent: %s", sessionID, m.currentAgentID()))
 	infoLines := make([]string, 0, 2)
 	if strings.TrimSpace(m.notice) != "" {
-		infoLines = append(infoLines, lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(
-			truncateANSI("Error: "+strings.TrimSpace(m.notice), max(10, width-2)),
-		))
+		noticeText := strings.TrimSpace(m.notice)
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+		if m.noticeIsError {
+			noticeText = "Error: " + noticeText
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+		}
+		infoLines = append(infoLines, style.Render(truncateANSI(noticeText, max(10, width-2))))
 	} else if strings.TrimSpace(m.banner) != "" {
 		infoLines = append(infoLines, lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(
 			truncateANSI(strings.TrimSpace(m.banner), max(10, width-2)),
@@ -4257,7 +4323,28 @@ func appendJSONL(path string, payload any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.Marshal(payload)
+	encoded := payload
+	switch v := payload.(type) {
+	case llm.Message:
+		encoded = struct {
+			llm.Message
+			TS string `json:"ts,omitempty"`
+		}{
+			Message: v,
+			TS:      time.Now().UTC().Format(time.RFC3339Nano),
+		}
+	case *llm.Message:
+		if v != nil {
+			encoded = struct {
+				llm.Message
+				TS string `json:"ts,omitempty"`
+			}{
+				Message: *v,
+				TS:      time.Now().UTC().Format(time.RFC3339Nano),
+			}
+		}
+	}
+	data, err := json.Marshal(encoded)
 	if err != nil {
 		return err
 	}

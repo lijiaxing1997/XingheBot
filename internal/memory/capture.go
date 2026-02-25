@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"test_skill_agent/internal/llm"
 )
 
 type CaptureResponse struct {
@@ -26,6 +28,7 @@ type CaptureResponse struct {
 type historyMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	TS      string `json:"ts,omitempty"`
 }
 
 func CaptureSessionFromHistory(ctx context.Context, cfg Config, root string, runID string, historyPath string, maxMessages int, now time.Time) (CaptureResponse, error) {
@@ -70,6 +73,8 @@ func CaptureSessionFromHistory(ctx context.Context, cfg Config, root string, run
 
 	transcript := make([]historyMessage, 0, minInt(maxMessages, 64))
 	compactionSummary := ""
+	compactionSummaryAt := ""
+	toolNameByCallID := make(map[string]string)
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
@@ -81,22 +86,40 @@ func CaptureSessionFromHistory(ctx context.Context, cfg Config, root string, run
 		if line == "" {
 			continue
 		}
-		var msg historyMessage
+		var msg struct {
+			llm.Message
+			TS string `json:"ts,omitempty"`
+		}
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
 			continue
 		}
 		role := strings.ToLower(strings.TrimSpace(msg.Role))
 		content := strings.TrimSpace(msg.Content)
 		if content == "" {
-			continue
+			if role != "assistant" || len(msg.ToolCalls) == 0 {
+				continue
+			}
 		}
 
 		if role == "system" && strings.Contains(content, "Summary of earlier conversation:") && strings.Contains(content, "Context compacted automatically") {
 			compactionSummary = extractSummarySection(content)
+			compactionSummaryAt = strings.TrimSpace(msg.TS)
 			continue
 		}
 
-		if role != "user" && role != "assistant" {
+		if role == "assistant" && len(msg.ToolCalls) > 0 {
+			for _, call := range msg.ToolCalls {
+				id := strings.TrimSpace(call.ID)
+				name := strings.TrimSpace(call.Function.Name)
+				if id == "" || name == "" {
+					continue
+				}
+				toolNameByCallID[id] = name
+			}
+		}
+
+		keep := role == "user" || role == "assistant" || role == "tool"
+		if !keep {
 			continue
 		}
 		content = oneLine(content)
@@ -106,12 +129,27 @@ func CaptureSessionFromHistory(ctx context.Context, cfg Config, root string, run
 		if isLikelyPromptInjection(content) {
 			continue
 		}
-		if runeLen(content) > 900 {
-			content = truncateRunes(content, 900) + "…"
+		maxRunes := 900
+		if role == "tool" {
+			maxRunes = 700
+		}
+		if runeLen(content) > maxRunes {
+			content = truncateRunes(content, maxRunes) + "…"
 		}
 		content, _ = RedactText(cfg, content)
 
-		transcript = append(transcript, historyMessage{Role: role, Content: content})
+		if role == "tool" {
+			name := strings.TrimSpace(toolNameByCallID[strings.TrimSpace(msg.ToolCallID)])
+			if name != "" {
+				content = fmt.Sprintf("tool(%s): %s", name, strings.TrimSpace(content))
+			} else if strings.TrimSpace(msg.ToolCallID) != "" {
+				content = fmt.Sprintf("tool(call_id=%s): %s", strings.TrimSpace(msg.ToolCallID), strings.TrimSpace(content))
+			} else {
+				content = fmt.Sprintf("tool: %s", strings.TrimSpace(content))
+			}
+		}
+
+		transcript = append(transcript, historyMessage{Role: role, Content: content, TS: strings.TrimSpace(msg.TS)})
 		if len(transcript) > maxMessages {
 			transcript = transcript[len(transcript)-maxMessages:]
 		}
@@ -139,6 +177,9 @@ func CaptureSessionFromHistory(ctx context.Context, cfg Config, root string, run
 
 	if compactionSummary != "" {
 		b.WriteString("## Compaction Summary\n\n")
+		if strings.TrimSpace(compactionSummaryAt) != "" {
+			b.WriteString("- at: " + strings.TrimSpace(compactionSummaryAt) + "\n")
+		}
 		for _, line := range strings.Split(compactionSummary, "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" {
@@ -154,11 +195,15 @@ func CaptureSessionFromHistory(ctx context.Context, cfg Config, root string, run
 
 	b.WriteString(fmt.Sprintf("## Messages (last %d)\n\n", len(transcript)))
 	for _, msg := range transcript {
+		at := strings.TrimSpace(msg.TS)
+		if at == "" {
+			at = "?"
+		}
 		role := strings.TrimSpace(msg.Role)
 		if role == "" {
 			role = "unknown"
 		}
-		b.WriteString("- " + role + ": " + strings.TrimSpace(msg.Content) + "\n")
+		b.WriteString("- " + at + " " + role + ": " + strings.TrimSpace(msg.Content) + "\n")
 	}
 	content := b.String()
 	if !strings.HasSuffix(content, "\n") {

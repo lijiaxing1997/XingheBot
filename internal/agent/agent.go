@@ -10,10 +10,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"test_skill_agent/internal/appinfo"
 	"test_skill_agent/internal/llm"
+	"test_skill_agent/internal/memory"
 	"test_skill_agent/internal/restart"
 	"test_skill_agent/internal/skills"
 	"test_skill_agent/internal/tools"
@@ -23,6 +25,7 @@ type Agent struct {
 	Client       *llm.Client
 	Tools        *tools.Registry
 	SkillsDir    string
+	ConfigPath   string
 	SkillIndex   []skills.Skill
 	MCPReload    func(context.Context) (string, error)
 	Temperature  float32
@@ -35,6 +38,10 @@ type Agent struct {
 	StartupBanner  string
 
 	AutoCompaction AutoCompactionConfig
+
+	memoryUpdateMu      sync.Mutex
+	memoryUpdateRunning bool
+	memoryUpdatePending *memoryMDUpdateJob
 }
 
 type PromptMode string
@@ -182,6 +189,9 @@ func (a *Agent) buildSystemPrompt() string {
 		b.WriteString("## Long-term Memory (cross-session)\n")
 		b.WriteString("- When the user asks about previous decisions, preferences, TODOs, names, dates, or \"what we did last time\": ALWAYS call memory_search before answering.\n")
 		b.WriteString("- Use memory_get to fetch the exact lines you need.\n")
+		b.WriteString("- If memory_search returns no results (or results are irrelevant) but the user is clearly asking about past context:\n")
+		b.WriteString("  - Spawn a child agent to do a best-effort deep search within the memory root (MEMORY.md, daily/*.md, sessions/*.md). Use search/rg to locate likely matches and report back with file paths + line numbers.\n")
+		b.WriteString("  - Then use memory_get on the reported paths/lines to cite/quote precisely in your final answer.\n")
 		b.WriteString("- When the user explicitly asks to remember something (\"记住/以后都这样/下次提醒\") or you want to store a durable decision: use memory_append.\n")
 		b.WriteString("\n")
 
@@ -205,6 +215,7 @@ func (a *Agent) buildSystemPrompt() string {
 	b.WriteString("## Long-term Memory (cross-session)\n")
 	b.WriteString("- When asked about previous decisions, preferences, TODOs, names, dates, or \"what we did last time\": ALWAYS call memory_search first.\n")
 	b.WriteString("- Use memory_get to retrieve the exact snippet before quoting/using it.\n")
+	b.WriteString("- If memory_search returns empty/irrelevant but the user is asking about past context: directly search the memory root on disk (MEMORY.md, daily/*.md, sessions/*.md) using search/rg, then use memory_get to quote the exact lines.\n")
 	b.WriteString("- Use memory_append to store durable preferences/decisions/TODOs (it redacts common secrets; still avoid writing secrets).\n")
 	b.WriteString("\n")
 	b.WriteString("## Artifacts (multi-agent)\n")
@@ -326,7 +337,6 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 	if a.Client == nil {
 		return fmt.Errorf("llm client is nil")
 	}
-	systemMsg := llm.Message{Role: "system", Content: a.SystemPrompt}
 	history := make([]llm.Message, 0, 64)
 	scanner := bufio.NewScanner(in)
 	printer := newToolPrinter(out)
@@ -396,9 +406,14 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 		}
 
 		turnHistory := []llm.Message{{Role: "user", Content: text}}
-		reqMessages := append([]llm.Message{}, systemMsg)
+		preamble := a.turnSystemPreamble(ctx)
+		preambleLen := len(preamble)
+		reqMessages := append([]llm.Message{}, preamble...)
 		reqMessages = append(reqMessages, history...)
 		reqMessages = append(reqMessages, turnHistory...)
+
+		toolRecords := make([]memory.ToolRecord, 0, 12)
+		finalAssistant := ""
 
 		didAutoFlush := false
 		for {
@@ -446,12 +461,22 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 			reqMessages = append(reqMessages, msg)
 
 			if len(msg.ToolCalls) == 0 {
+				finalAssistant = msg.Content
 				if msg.Content != "" {
 					fmt.Fprintln(out, msg.Content)
 				}
 				if len(reqMessages) > 0 {
-					history = append([]llm.Message{}, reqMessages[1:]...)
+					if preambleLen < 0 || preambleLen > len(reqMessages) {
+						preambleLen = 0
+					}
+					history = append([]llm.Message{}, reqMessages[preambleLen:]...)
 				}
+				a.queueMemoryMDUpdate(memoryMDUpdateJob{
+					RunID:          "plain",
+					UserRequest:    text,
+					AssistantFinal: strings.TrimSpace(finalAssistant),
+					ToolRecords:    toolRecords,
+				})
 				break
 			}
 
@@ -469,6 +494,15 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 				if err != nil {
 					toolMsg.Content = "ERROR: " + err.Error()
 				}
+				rec := memory.ToolRecord{
+					Name:      strings.TrimSpace(call.Function.Name),
+					Arguments: call.Function.Arguments,
+					Result:    result,
+				}
+				if err != nil {
+					rec.Error = err.Error()
+				}
+				toolRecords = append(toolRecords, rec)
 				turnHistory = append(turnHistory, toolMsg)
 				reqMessages = append(reqMessages, toolMsg)
 				if a.shouldTriggerAutoMCPReloadAfterToolCall(call, err) {
@@ -481,7 +515,6 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 				if call.Function.Name == "skill_create" || call.Function.Name == "skill_install" {
 					_ = a.ReloadSkills()
 					a.SystemPrompt = a.buildSystemPrompt()
-					systemMsg = llm.Message{Role: "system", Content: a.SystemPrompt}
 				}
 			}
 

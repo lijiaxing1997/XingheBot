@@ -25,6 +25,7 @@ type Config struct {
 	WorkspaceDir string `json:"workspace_dir"`
 	ProjectKey   string `json:"project_key"`
 	RootDir      string `json:"root_dir"`
+	Timezone     string `json:"timezone"`
 
 	Backend string `json:"backend"`
 
@@ -38,9 +39,14 @@ type Config struct {
 
 	Embeddings EmbeddingsConfig `json:"embeddings"`
 
+	AutoLoadMemoryIntoPrompt *bool `json:"auto_load_memory_into_prompt"`
+	AutoUpdateMemoryMD       *bool `json:"auto_update_memory_md"`
+	MemoryMDMaxChars         int   `json:"memory_md_max_chars"`
+
 	AutoFlushOnCompaction     *bool `json:"auto_flush_on_compaction"`
 	AutoCaptureOnNewSession   *bool `json:"auto_capture_on_new_session"`
 	AutoFlushOnSessionCapture *bool `json:"auto_flush_on_session_capture"`
+	AutoDailySummary          *bool `json:"auto_daily_summary"`
 	IndexHistoryJSONL         *bool `json:"index_history_jsonl"`
 
 	MaxResults int `json:"max_results"`
@@ -55,10 +61,12 @@ type configFile struct {
 func DefaultConfig() Config {
 	return Config{
 		WorkspaceDir:       "~/.xinghebot/workspace",
+		Timezone:           "Local",
 		Backend:            "scan",
 		MaxResults:         10,
 		HybridVectorWeight: 0.7,
 		HybridTextWeight:   0.3,
+		MemoryMDMaxChars:   1000,
 		Embeddings: EmbeddingsConfig{
 			Model: "text-embedding-3-small",
 		},
@@ -74,6 +82,9 @@ func (c Config) WithDefaults() Config {
 	if strings.TrimSpace(out.WorkspaceDir) == "" {
 		out.WorkspaceDir = DefaultConfig().WorkspaceDir
 	}
+	if strings.TrimSpace(out.Timezone) == "" {
+		out.Timezone = DefaultConfig().Timezone
+	}
 	if strings.TrimSpace(out.Backend) == "" {
 		out.Backend = DefaultConfig().Backend
 	}
@@ -86,6 +97,9 @@ func (c Config) WithDefaults() Config {
 	if out.HybridTextWeight <= 0 {
 		out.HybridTextWeight = DefaultConfig().HybridTextWeight
 	}
+	if out.MemoryMDMaxChars <= 0 {
+		out.MemoryMDMaxChars = DefaultConfig().MemoryMDMaxChars
+	}
 	if strings.TrimSpace(out.Embeddings.Model) == "" {
 		out.Embeddings.Model = DefaultConfig().Embeddings.Model
 	}
@@ -96,6 +110,14 @@ func (c Config) WithDefaults() Config {
 	if out.VectorEnabled == nil {
 		v := true
 		out.VectorEnabled = &v
+	}
+	if out.AutoLoadMemoryIntoPrompt == nil {
+		v := true
+		out.AutoLoadMemoryIntoPrompt = &v
+	}
+	if out.AutoUpdateMemoryMD == nil {
+		v := true
+		out.AutoUpdateMemoryMD = &v
 	}
 	if out.AutoFlushOnCompaction == nil {
 		v := true
@@ -108,6 +130,10 @@ func (c Config) WithDefaults() Config {
 	if out.AutoFlushOnSessionCapture == nil {
 		v := true
 		out.AutoFlushOnSessionCapture = &v
+	}
+	if out.AutoDailySummary == nil {
+		v := true
+		out.AutoDailySummary = &v
 	}
 	if out.IndexHistoryJSONL == nil {
 		v := false

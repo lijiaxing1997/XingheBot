@@ -50,8 +50,10 @@ type GetResponse struct {
 }
 
 type AppendResponse struct {
-	Path string `json:"path"`
-	Line string `json:"line"`
+	Path      string `json:"path"`
+	Line      string `json:"line"`
+	Appended  bool   `json:"appended"`
+	Duplicate bool   `json:"duplicate,omitempty"`
 }
 
 func EnsureLayout(root string) error {
@@ -92,17 +94,20 @@ func EnsureLayout(root string) error {
 		template := strings.Join([]string{
 			"# MEMORY",
 			"",
+			"> This file is auto-loaded into the PRIMARY agent prompt and may be auto-updated.",
+			"> Keep it compact (<= 1000 chars). Avoid secrets.",
+			"",
 			"## Preferences",
-			"- (write user preferences here)",
-			"",
-			"## Project Facts",
-			"- (write stable project facts here; avoid secrets)",
-			"",
-			"## Decisions",
-			"- (write key decisions + rationale here)",
+			"- (user preferences; add source=run_id when possible)",
 			"",
 			"## TODO",
-			"- (long-term TODOs across sessions)",
+			"- (open TODOs across sessions; include source=run_id)",
+			"",
+			"## Work Log",
+			"- (brief work record summaries; include source=run_id)",
+			"",
+			"## Notes",
+			"- (key facts/decisions/constraints; include source=run_id; avoid secrets)",
 			"",
 		}, "\n")
 		if err := os.WriteFile(memPath, []byte(template), 0o644); err != nil {
@@ -181,9 +186,22 @@ func AppendDaily(ctx context.Context, cfg Config, root string, kind string, text
 	line += "\n"
 
 	lockPath := filepath.Join(root, "index", ".daily.lock")
+	resp := AppendResponse{Path: cleanRel, Line: strings.TrimRight(line, "\n")}
+	newKey, _ := dailyLineKey(resp.Line)
 	if err := withFileLock(ctx, lockPath, 5*time.Second, func() error {
 		if err := EnsureLayout(root); err != nil {
 			return err
+		}
+		if newKey != "" {
+			dup, err := dailyFileHasKey(ctx, abs, newKey)
+			if err != nil {
+				return err
+			}
+			if dup {
+				resp.Appended = false
+				resp.Duplicate = true
+				return nil
+			}
 		}
 		f, err := os.OpenFile(abs, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
@@ -191,12 +209,110 @@ func AppendDaily(ctx context.Context, cfg Config, root string, kind string, text
 		}
 		defer f.Close()
 		_, err = io.WriteString(f, line)
+		if err == nil {
+			resp.Appended = true
+		}
 		return err
 	}); err != nil {
 		return AppendResponse{}, err
 	}
 
-	return AppendResponse{Path: cleanRel, Line: strings.TrimRight(line, "\n")}, nil
+	return resp, nil
+}
+
+func dailyFileHasKey(ctx context.Context, path string, key string) (bool, error) {
+	if strings.TrimSpace(path) == "" || strings.TrimSpace(key) == "" {
+		return false, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		lineKey, ok := dailyLineKey(scanner.Text())
+		if ok && lineKey == key {
+			return true, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func dailyLineKey(line string) (string, bool) {
+	s := strings.TrimSpace(line)
+	if !strings.HasPrefix(s, "- ") {
+		return "", false
+	}
+	rest := strings.TrimSpace(s[2:])
+	if rest == "" {
+		return "", false
+	}
+
+	open := strings.Index(rest, "[")
+	close := -1
+	if open >= 0 {
+		if idx := strings.Index(rest[open:], "]"); idx >= 0 {
+			close = open + idx
+		}
+	}
+	if open < 0 || close < 0 || close <= open+1 {
+		return "", false
+	}
+
+	kind := strings.ToLower(strings.TrimSpace(rest[open+1 : close]))
+	if kind == "" {
+		return "", false
+	}
+
+	content := strings.TrimSpace(rest[close+1:])
+	if content == "" {
+		return "", false
+	}
+
+	if idx := strings.LastIndex(content, " (source="); idx >= 0 && strings.HasSuffix(content, ")") {
+		content = strings.TrimSpace(content[:idx])
+	}
+
+	fields := strings.Fields(content)
+	if len(fields) == 0 {
+		return "", false
+	}
+
+	tags := make([]string, 0, 4)
+	end := len(fields)
+	for end > 0 {
+		f := strings.TrimSpace(fields[end-1])
+		if strings.HasPrefix(f, "#") && len(f) > 1 {
+			tags = append(tags, f)
+			end--
+			continue
+		}
+		break
+	}
+
+	text := strings.TrimSpace(strings.Join(fields[:end], " "))
+	if text == "" {
+		return "", false
+	}
+
+	key := kind + "|" + normalizeDedupeKey(text)
+	if len(tags) > 0 {
+		sort.Strings(tags)
+		key += "|" + strings.Join(tags, ",")
+	}
+	return key, true
 }
 
 func Search(ctx context.Context, cfg Config, root string, query string, maxResults int) (SearchResponse, error) {

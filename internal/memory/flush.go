@@ -73,10 +73,14 @@ func FlushFromText(ctx context.Context, cfg Config, root string, text string, ma
 		if err != nil {
 			return FlushResponse{}, err
 		}
-		if path == "" {
+		if path == "" && strings.TrimSpace(ar.Path) != "" {
 			path = ar.Path
 		}
-		appended++
+		if ar.Appended {
+			appended++
+		} else {
+			skipped++
+		}
 	}
 	resp.Path = path
 	resp.Appended = appended
@@ -129,6 +133,9 @@ func ExtractDurableNotes(text string, maxItems int) []FlushItem {
 		}
 
 		kind, tags := classifyDurableLine(t)
+		if kind == "note" {
+			continue
+		}
 		t = strings.TrimSpace(t)
 		if t == "" {
 			continue
@@ -137,7 +144,7 @@ func ExtractDurableNotes(text string, maxItems int) []FlushItem {
 			t = truncateRunes(t, 600) + "…"
 		}
 
-		key := normalizeDedupeKey(t)
+		key := kind + "|" + normalizeDedupeKey(t)
 		if key == "" {
 			continue
 		}
@@ -199,18 +206,42 @@ func isLikelyPromptInjection(text string) bool {
 }
 
 func classifyDurableLine(text string) (kind string, tags []string) {
-	s := strings.ToLower(strings.TrimSpace(text))
-	if s == "" {
+	raw := strings.TrimSpace(text)
+	if raw == "" {
 		return "note", nil
 	}
-	switch {
-	case strings.Contains(s, "偏好") || strings.Contains(s, "preference") || strings.Contains(s, "reply style") || strings.Contains(s, "输出") || strings.Contains(s, "format"):
-		return "pref", []string{"prefs"}
-	case strings.Contains(s, "决定") || strings.Contains(s, "decision") || strings.Contains(s, "we decided") || strings.Contains(s, "选择") || strings.Contains(s, "adopt") || strings.Contains(s, "方案"):
-		return "decision", []string{"arch"}
-	case strings.Contains(s, "todo") || strings.Contains(s, "待办") || strings.Contains(s, "open question") || strings.Contains(s, "未解决") || strings.Contains(s, "next"):
+	lower := strings.ToLower(raw)
+
+	// TODO / task tracking.
+	if strings.HasPrefix(lower, "todo") || strings.HasPrefix(raw, "待办") || strings.HasPrefix(raw, "下一步") {
 		return "todo", []string{"todo"}
-	default:
-		return "note", nil
 	}
+
+	// Decisions.
+	if strings.HasPrefix(raw, "决定") || strings.HasPrefix(raw, "决策") || strings.HasPrefix(lower, "decision") || strings.Contains(lower, "we decided") {
+		return "decision", []string{"arch"}
+	}
+
+	// Preferences.
+	if strings.HasPrefix(raw, "用户偏好") || strings.HasPrefix(raw, "偏好") || strings.HasPrefix(raw, "回复风格") {
+		return "pref", []string{"prefs"}
+	}
+	if strings.HasPrefix(lower, "preference") || strings.HasPrefix(lower, "preferences") || strings.HasPrefix(lower, "reply style") || strings.HasPrefix(lower, "pref") {
+		return "pref", []string{"prefs"}
+	}
+
+	// Addressing / naming preferences.
+	if strings.Contains(raw, "以后叫") || strings.Contains(raw, "今后叫") || strings.Contains(raw, "从现在起叫") ||
+		strings.Contains(raw, "以后称呼") || strings.Contains(raw, "今后称呼") ||
+		strings.Contains(raw, "请叫") || strings.Contains(raw, "叫我") || strings.Contains(raw, "称呼我") ||
+		strings.Contains(raw, "叫用户") || strings.Contains(raw, "称呼用户") {
+		return "pref", []string{"prefs"}
+	}
+
+	// Output / format preferences (heuristic).
+	if strings.Contains(raw, "输出") && (strings.Contains(raw, "尽量") || strings.Contains(raw, "尽可能") || strings.Contains(raw, "不要") || strings.Contains(raw, "必须") || strings.Contains(raw, "保持")) {
+		return "pref", []string{"prefs"}
+	}
+
+	return "note", nil
 }
