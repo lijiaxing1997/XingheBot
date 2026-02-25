@@ -116,6 +116,10 @@ func (t *ExecCommandTool) Call(ctx context.Context, args json.RawMessage) (strin
 		}
 		cmd.Stdout = stdoutCapture
 		cmd.Stderr = stderrCapture
+		// Bound how long Run/Wait can hang after cancellation if orphaned subprocesses
+		// keep stdout/stderr pipes open.
+		cmd.WaitDelay = 500 * time.Millisecond
+		configureExecCommandCancellation(cmd)
 	}
 
 	start := time.Now()
@@ -137,15 +141,24 @@ func (t *ExecCommandTool) Call(ctx context.Context, args json.RawMessage) (strin
 		err = cmd.Run()
 	}
 
+	ctxErr := cmdCtx.Err()
+	timedOut := errors.Is(ctxErr, context.DeadlineExceeded)
+	canceled := errors.Is(ctxErr, context.Canceled)
+
 	exitCode, errorType := classifyExecError(err)
 	if err == nil {
 		errorType = "none"
+	} else if timedOut {
+		exitCode = -1
+		errorType = "timeout"
+	} else if canceled {
+		exitCode = -1
+		errorType = "canceled"
 	}
 	errorMessage := "-"
 	if err != nil {
 		errorMessage = strings.TrimSpace(err.Error())
 	}
-	timedOut := errors.Is(err, context.DeadlineExceeded) || errors.Is(cmdCtx.Err(), context.DeadlineExceeded)
 	argsJSON, _ := json.Marshal(in.Args)
 
 	out := fmt.Sprintf(
