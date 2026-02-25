@@ -14,6 +14,7 @@ import (
 	"test_skill_agent/internal/agent"
 	"test_skill_agent/internal/appinfo"
 	"test_skill_agent/internal/autonomy/cronrunner"
+	"test_skill_agent/internal/autonomy/heartbeatrunner"
 	"test_skill_agent/internal/llm"
 	"test_skill_agent/internal/mcpclient"
 	"test_skill_agent/internal/memory"
@@ -607,6 +608,20 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 		}
 	}
 
+	var hbRun *heartbeatrunner.Runner
+	if strings.TrimSpace(os.Getenv("MULTI_AGENT_AGENT_ID")) == "" {
+		if runner, err := heartbeatrunner.Start(cleanupCtx, heartbeatrunner.RunnerOptions{
+			Client:      client,
+			ConfigPath:  opts.ConfigPath,
+			WorkDir:     workDir,
+			Temperature: float32(opts.Temperature),
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "warning:", err)
+		} else if runner != nil {
+			hbRun = runner
+		}
+	}
+
 	wakeCron := func() {}
 	if cronRun != nil {
 		wakeCron = cronRun.Wake
@@ -618,6 +633,16 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	registry.Register(&tools.CronEnableTool{ConfigPath: opts.ConfigPath, Enabled: true, Wake: wakeCron})
 	registry.Register(&tools.CronEnableTool{ConfigPath: opts.ConfigPath, Enabled: false, Wake: wakeCron})
 	registry.Register(&tools.CronRunNowTool{ConfigPath: opts.ConfigPath, Wake: wakeCron})
+
+	var wakeHeartbeat func(reason string)
+	if hbRun != nil {
+		wakeHeartbeat = hbRun.Wake
+	}
+	registry.Register(&tools.HeartbeatStatusTool{ConfigPath: opts.ConfigPath, Runner: hbRun})
+	registry.Register(&tools.HeartbeatGetTool{ConfigPath: opts.ConfigPath})
+	registry.Register(&tools.HeartbeatSetTool{ConfigPath: opts.ConfigPath, Wake: wakeHeartbeat})
+	registry.Register(&tools.HeartbeatClearTool{ConfigPath: opts.ConfigPath, Wake: wakeHeartbeat})
+	registry.Register(&tools.HeartbeatRunNowTool{Wake: wakeHeartbeat})
 
 	registry.Register(&tools.AgentRunCreateTool{Coordinator: coord})
 	registry.Register(&tools.AgentRunListTool{Coordinator: coord})

@@ -174,6 +174,12 @@ func (a *Agent) buildSystemPrompt() string {
 		}
 		b.WriteString("\n")
 
+		b.WriteString("## Autonomy (Heartbeat/Cron)\n")
+		b.WriteString("- cron_* tools manage persistent scheduled jobs (add/list/get/enable/disable/run-now). Jobs run in-process and typically deliver results via the email gateway.\n")
+		b.WriteString("- heartbeat_* tools manage HEARTBEAT.md (read/write/clear/status/run-now). HEARTBEAT.md is NOT auto-cleared; clearing/updating is an explicit action.\n")
+		b.WriteString("- Do not confuse autonomy heartbeat with cluster heartbeat (start_params.*.heartbeat).\n")
+		b.WriteString("\n")
+
 		b.WriteString("## System Messages\n")
 		b.WriteString("`[System Message] ...` blocks are internal context and are not user-visible by default.\n")
 		b.WriteString("If a [System Message] reports completed child-agent work and asks for a user update, rewrite it in your normal assistant voice and provide that update.\n")
@@ -471,14 +477,14 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 					}
 					history = append([]llm.Message{}, reqMessages[preambleLen:]...)
 				}
-					a.queueMemoryMDUpdate(memoryMDUpdateJob{
-						RunID:          "plain",
-						UserRequest:    text,
-						AssistantFinal: strings.TrimSpace(finalAssistant),
-						ToolRecords:    toolRecords,
-					})
-					break
-				}
+				a.queueMemoryMDUpdate(memoryMDUpdateJob{
+					RunID:          "plain",
+					UserRequest:    text,
+					AssistantFinal: strings.TrimSpace(finalAssistant),
+					ToolRecords:    toolRecords,
+				})
+				break
+			}
 
 			needsAutoMCPReload := false
 			for _, call := range msg.ToolCalls {

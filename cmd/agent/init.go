@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"test_skill_agent/internal/autonomy"
+	"test_skill_agent/internal/autonomy/heartbeatrunner"
 	"test_skill_agent/internal/bootstrap"
 	"test_skill_agent/internal/memory"
 )
@@ -80,6 +82,35 @@ func runInit(role string, configPath string, mcpConfigPath string, skillsDir str
 		fmt.Fprintf(os.Stdout, "memory: (%s)\n", memStatus)
 	}
 
+	heartbeatStatus := "skipped"
+	heartbeatPath := ""
+	if cfg, cfgErr := autonomy.LoadConfig(report.ConfigPath); cfgErr == nil {
+		cwd, _ := os.Getwd()
+		if p, err := heartbeatrunner.ResolveHeartbeatFilePath(cfg.Heartbeat.Path, cwd); err == nil {
+			heartbeatPath = p
+			if _, err := os.Stat(heartbeatPath); err == nil {
+				heartbeatStatus = "exists"
+			} else if err != nil && os.IsNotExist(err) {
+				if err := heartbeatrunner.WriteHeartbeatFileAtomic(heartbeatPath, defaultHeartbeatTemplate); err != nil {
+					heartbeatStatus = "error: " + err.Error()
+				} else {
+					heartbeatStatus = "created"
+				}
+			} else if err != nil {
+				heartbeatStatus = "error: " + err.Error()
+			}
+		} else if err != nil {
+			heartbeatStatus = "error: " + err.Error()
+		}
+	} else if cfgErr != nil {
+		heartbeatStatus = "error: " + cfgErr.Error()
+	}
+	if strings.TrimSpace(heartbeatPath) != "" {
+		fmt.Fprintf(os.Stdout, "heartbeat: %s (%s)\n", heartbeatPath, heartbeatStatus)
+	} else {
+		fmt.Fprintf(os.Stdout, "heartbeat: (%s)\n", heartbeatStatus)
+	}
+
 	wantSkills := []string{"skill-creator", "skill-installer", "mcp-builder", "mcp-config-manager", "ssh-deploy-slave"}
 	found := make([]string, 0, len(wantSkills))
 	for _, s := range wantSkills {
@@ -105,3 +136,8 @@ func runInit(role string, configPath string, mcpConfigPath string, skillsDir str
 
 	return nil
 }
+
+const defaultHeartbeatTemplate = `# HEARTBEAT.md
+
+- [ ]
+`
