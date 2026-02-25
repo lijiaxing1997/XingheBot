@@ -111,7 +111,15 @@ func runInit(role string, configPath string, mcpConfigPath string, skillsDir str
 		fmt.Fprintf(os.Stdout, "heartbeat: (%s)\n", heartbeatStatus)
 	}
 
-	wantSkills := []string{"skill-creator", "skill-installer", "mcp-builder", "mcp-config-manager", "ssh-deploy-slave"}
+	wantSkills := []string{
+		"xinghebot-dev-manual",
+		"skill-creator",
+		"skill-installer",
+		"mcp-builder",
+		"mcp-config-manager",
+		"ssh-deploy-slave",
+		"slave-file-manager",
+	}
 	found := make([]string, 0, len(wantSkills))
 	for _, s := range wantSkills {
 		if info, err := os.Stat(filepath.Join(report.SkillsDir, s)); err == nil && info.IsDir() {

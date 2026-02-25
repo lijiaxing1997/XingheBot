@@ -112,6 +112,7 @@ func buildBundle(root string) ([]byte, error) {
 	}
 
 	skills := []string{
+		"xinghebot-dev-manual",
 		"skill-creator",
 		"skill-installer",
 		"mcp-builder",
