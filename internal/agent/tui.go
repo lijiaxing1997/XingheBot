@@ -1462,7 +1462,8 @@ func (m *tuiModel) runTurnEmail(taskCtx context.Context, runID string, userText 
 		msgs = append(msgs, m.maybeBuildMemoryFlushSystemMessages(call, result, callErr)...)
 		return msgs
 	}
-	err := runTUITurnStreaming(ctx, agentRef, runID, userTextForLLM, baseHistory, emit, afterTool)
+	runTitle := readRunTitle(m.coord, runID)
+	err := runTUITurnStreaming(ctx, agentRef, runID, runTitle, userTextForLLM, baseHistory, emit, afterTool)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			emit(llm.Message{Role: "system", Content: "Canceled."})
@@ -1814,7 +1815,8 @@ func (m *tuiModel) runAutoFollowup(taskCtx context.Context, runID string, baseHi
 	if style := strings.TrimSpace(agentRef.ReplyStyle); style != "" {
 		userText += "\n\nReply style requirements (must follow):\n" + style
 	}
-	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit, nil); err != nil {
+	runTitle := readRunTitle(m.coord, runID)
+	if err := runTUITurnStreaming(ctx, agentRef, runID, runTitle, userText, baseHistory, emit, nil); err != nil {
 		if errors.Is(err, context.Canceled) {
 			emit(llm.Message{Role: "system", Content: "Canceled."})
 			return
@@ -2638,7 +2640,7 @@ func (m *tuiModel) submitInput() tea.Cmd {
 	m.createPrimaryAgent(runID)
 	sess := m.sessionData[runID]
 	base := append([]llm.Message(nil), sess.History...)
-	shouldSetTitle := len(base) == 0 && !m.runHasTitle(runID)
+	shouldSetTitle := !historyHasUserMessages(base) && !m.runHasTitle(runID)
 
 	userMsg := llm.Message{Role: "user", Content: text}
 	sess.History = append(sess.History, userMsg)
@@ -2697,6 +2699,7 @@ func (m *tuiModel) runTurn(taskCtx context.Context, runID string, userText strin
 			events <- tuiAsyncMsg{Event: tuiRunManifestUpdatedMsg{RunID: runID, Run: updated, Err: err}}
 		}
 	}
+	runTitle := readRunTitle(coord, runID)
 
 	emit := func(msg llm.Message) {
 		events <- tuiAsyncMsg{Event: tuiAppendHistoryMsg{
@@ -2710,7 +2713,7 @@ func (m *tuiModel) runTurn(taskCtx context.Context, runID string, userText strin
 		msgs = append(msgs, m.maybeBuildMemoryFlushSystemMessages(call, result, callErr)...)
 		return msgs
 	}
-	if err := runTUITurnStreaming(ctx, agentRef, runID, userText, baseHistory, emit, afterTool); err != nil {
+	if err := runTUITurnStreaming(ctx, agentRef, runID, runTitle, userText, baseHistory, emit, afterTool); err != nil {
 		if errors.Is(err, context.Canceled) {
 			emit(llm.Message{Role: "system", Content: "Canceled."})
 		} else {
@@ -2800,7 +2803,38 @@ func fallbackSessionTitle(userText string) string {
 	return text
 }
 
-func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText string, baseHistory []llm.Message, emit func(llm.Message), afterTool func(call llm.ToolCall, result string, callErr error) []llm.Message) error {
+func historyHasUserMessages(history []llm.Message) bool {
+	for _, msg := range history {
+		if strings.EqualFold(strings.TrimSpace(msg.Role), "user") {
+			return true
+		}
+	}
+	return false
+}
+
+func readRunTitle(coord *multiagent.Coordinator, runID string) string {
+	if coord == nil {
+		return ""
+	}
+	id := strings.TrimSpace(runID)
+	if id == "" {
+		return ""
+	}
+	run, err := coord.ReadRun(id)
+	if err != nil {
+		return ""
+	}
+	if run.Metadata != nil {
+		if v, ok := run.Metadata["title"]; ok {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
+}
+
+func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, runTitle string, userText string, baseHistory []llm.Message, emit func(llm.Message), afterTool func(call llm.ToolCall, result string, callErr error) []llm.Message) error {
 	if a == nil || a.Client == nil {
 		return errors.New("agent is not configured")
 	}
@@ -2984,6 +3018,7 @@ func runTUITurnStreaming(ctx context.Context, a *Agent, runID string, userText s
 
 	a.queueMemoryMDUpdate(memoryMDUpdateJob{
 		RunID:          strings.TrimSpace(runID),
+		RunTitle:       strings.TrimSpace(runTitle),
 		UserRequest:    userText,
 		AssistantFinal: strings.TrimSpace(finalAssistant),
 		ToolRecords:    toolRecords,

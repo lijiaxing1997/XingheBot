@@ -39,9 +39,9 @@ type Agent struct {
 
 	AutoCompaction AutoCompactionConfig
 
-	memoryUpdateMu      sync.Mutex
-	memoryUpdateRunning bool
-	memoryUpdatePending *memoryMDUpdateJob
+	memoryMDUpdateMu      sync.Mutex
+	memoryMDUpdateRunning bool
+	memoryMDUpdateQueue   []memoryMDUpdateJob
 }
 
 type PromptMode string
@@ -471,14 +471,14 @@ func (a *Agent) RunInteractive(ctx context.Context, in io.Reader, out io.Writer)
 					}
 					history = append([]llm.Message{}, reqMessages[preambleLen:]...)
 				}
-				a.queueMemoryMDUpdate(memoryMDUpdateJob{
-					RunID:          "plain",
-					UserRequest:    text,
-					AssistantFinal: strings.TrimSpace(finalAssistant),
-					ToolRecords:    toolRecords,
-				})
-				break
-			}
+					a.queueMemoryMDUpdate(memoryMDUpdateJob{
+						RunID:          "plain",
+						UserRequest:    text,
+						AssistantFinal: strings.TrimSpace(finalAssistant),
+						ToolRecords:    toolRecords,
+					})
+					break
+				}
 
 			needsAutoMCPReload := false
 			for _, call := range msg.ToolCalls {

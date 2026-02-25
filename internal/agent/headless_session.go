@@ -35,7 +35,7 @@ func (a *Agent) RunHeadlessSessionWithHooks(ctx context.Context, runID string, u
 			hooks.Emit(msg)
 		}
 	}
-	if err := runTUITurnStreaming(ctx, a, runID, userText, baseHistory, emit, hooks.AfterTool); err != nil {
+	if err := runTUITurnStreaming(ctx, a, runID, "", userText, baseHistory, emit, hooks.AfterTool); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(final), nil

@@ -21,6 +21,7 @@ type ToolRecord struct {
 
 type MemoryMDUpdateInput struct {
 	RunID          string
+	RunTitle       string
 	UserRequest    string
 	AssistantFinal string
 	ToolRecords    []ToolRecord
@@ -38,6 +39,8 @@ type MemoryMDUpdateResponse struct {
 type chatClient interface {
 	Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResponse, error)
 }
+
+const defaultMemoryMDUpdateModelTimeout = 90 * time.Second
 
 func UpdateMemoryMDFromTurn(ctx context.Context, client chatClient, cfg Config, root string, in MemoryMDUpdateInput) (MemoryMDUpdateResponse, error) {
 	cfg = cfg.WithDefaults()
@@ -60,6 +63,11 @@ func UpdateMemoryMDFromTurn(ctx context.Context, client chatClient, cfg Config, 
 	if strings.TrimSpace(in.Now.Format(time.RFC3339Nano)) == "" || in.Now.IsZero() {
 		in.Now = time.Now().UTC()
 	}
+	loc, locErr := ResolveLocation(cfg.Timezone)
+	if locErr != nil || loc == nil {
+		loc = time.Local
+	}
+	turnNow := in.Now.In(loc)
 	maxChars := cfg.MemoryMDMaxChars
 	if maxChars <= 0 {
 		maxChars = 1000
@@ -88,6 +96,11 @@ func UpdateMemoryMDFromTurn(ctx context.Context, client chatClient, cfg Config, 
 	oldRedacted = SanitizeMemoryTextForPrompt(oldRedacted)
 
 	toolBlock := formatToolRecordsForMemoryUpdate(cfg, in.ToolRecords)
+	runTitle := strings.TrimSpace(in.RunTitle)
+	runTitle, _ = RedactText(cfg, runTitle)
+	if runeLen(runTitle) > 200 {
+		runTitle = truncateRunes(runTitle, 200) + "…"
+	}
 	userReq := strings.TrimSpace(in.UserRequest)
 	userReq, _ = RedactText(cfg, userReq)
 	if runeLen(userReq) > 2400 {
@@ -99,7 +112,7 @@ func UpdateMemoryMDFromTurn(ctx context.Context, client chatClient, cfg Config, 
 		assistantFinal = truncateRunes(assistantFinal, 2400) + "…"
 	}
 
-	prompt := buildMemoryMDUpdatePrompt(oldRedacted, runID, in.Now, userReq, toolBlock, assistantFinal, maxChars)
+	prompt := buildMemoryMDUpdatePrompt(oldRedacted, runID, runTitle, turnNow, userReq, toolBlock, assistantFinal, maxChars)
 
 	updated, err := callMemoryUpdateModel(ctx, client, prompt, maxChars)
 	if err != nil {
@@ -121,23 +134,20 @@ func UpdateMemoryMDFromTurn(ctx context.Context, client chatClient, cfg Config, 
 		NewChars: runeLen(newText),
 	}
 
-	compressed := false
-	if runeLen(newText) > maxChars {
-		compressPrompt := buildMemoryMDCompressPrompt(newText, maxChars)
-		compressedText, compressErr := callMemoryUpdateModel(ctx, client, compressPrompt, maxChars)
-		if compressErr == nil {
-			compressed = true
-			newText = normalizeMemoryMDOutput(compressedText)
-			newText, _ = RedactText(cfg, newText)
-			newText = SanitizeMemoryTextForPrompt(newText)
-			newText = ensureMemoryMDUpdateStamp(newText, runID, in.Now)
-		}
+	overLimit := runeLen(newText) > maxChars
+	if overLimit {
+		newText = hardTruncateMemoryMD(newText, maxChars)
 	}
+	newText = ensureMemoryMDUpdateStamp(newText, runID, in.Now)
+	if runeLen(newText) > maxChars {
+		newText = hardTruncateMemoryMD(newText, maxChars)
+	}
+	newText = ensureMemoryMDUpdateStamp(newText, runID, in.Now)
 	if runeLen(newText) > maxChars {
 		newText = hardTruncateMemoryMD(newText, maxChars)
 	}
 	resp.NewChars = runeLen(newText)
-	resp.Compressed = compressed
+	resp.Compressed = overLimit
 
 	lockPath := filepath.Join(root, "index", ".memory_md.lock")
 	if ctx == nil {
@@ -163,11 +173,12 @@ func UpdateMemoryMDFromTurn(ctx context.Context, client chatClient, cfg Config, 
 	return resp, nil
 }
 
-func buildMemoryMDUpdatePrompt(oldMemory string, runID string, now time.Time, userReq string, toolBlock string, assistantFinal string, maxChars int) string {
+func buildMemoryMDUpdatePrompt(oldMemory string, runID string, runTitle string, now time.Time, userReq string, toolBlock string, assistantFinal string, maxChars int) string {
 	if maxChars <= 0 {
 		maxChars = 1000
 	}
-	at := now.UTC().Format(time.RFC3339)
+	at := now.Format(time.RFC3339)
+	atMinute := now.Format("2006-01-02 15:04")
 	var b strings.Builder
 	b.WriteString("你是一个“长期记忆编辑器”。你要把已有的 MEMORY.md 和本次 session 的增量信息合并，输出更新后的 MEMORY.md。\n\n")
 	b.WriteString("目标：让未来的主 Agent 通过这份 MEMORY.md 快速了解用户偏好、当前 TODO、关键决策/约束、近期工作记录摘要。\n")
@@ -177,7 +188,9 @@ func buildMemoryMDUpdatePrompt(oldMemory string, runID string, now time.Time, us
 	b.WriteString("- 必须以 \"# MEMORY\" 开头。\n")
 	b.WriteString("- 严禁写入任何 secrets（API key、token、密码、邮箱授权码、私钥、cookie 等）。输入里如果出现敏感信息，必须丢弃或脱敏。\n")
 	b.WriteString("- 允许主动遗忘：删除已完成 TODO、过期细节、重复项、临时寒暄。\n")
-	b.WriteString(fmt.Sprintf("- 新增/更新的 bullet（以 \"- \" 开头）尽量带上来源 \"(source=%s)\"。\n", runID))
+	b.WriteString(fmt.Sprintf("- 新增/更新的 bullet（以 \"- \" 开头）尽量带上来源 \"(source=%s)\"；如已知 run_title，也请写上 \"title=\\\"...\\\"\"。\n", runID))
+	b.WriteString("- Work Log（工作记录）每条 bullet 尽量以 \"YYYY-MM-DD HH:MM\" 开头（精确到分钟，24 小时制），例如 \"2026-02-25 03:16\"。\n")
+	b.WriteString("- 对于本次 turn 的 Work Log 记录，优先使用 at_minute 作为时间；不要为旧记录编造分钟。\n")
 	b.WriteString("- 保留旧条目中已有的 source；如果实在无法判断来源，用 (source=unknown)。\n")
 	b.WriteString("- 优先保留：用户偏好、未完成 TODO、关键决策/约束、重要路径/命令约定、近期工作摘要。\n\n")
 	b.WriteString("建议结构（可按需精简，但尽量保留这些标题）：\n")
@@ -197,7 +210,11 @@ func buildMemoryMDUpdatePrompt(oldMemory string, runID string, now time.Time, us
 	}
 	b.WriteString("\n[This Turn]\n")
 	b.WriteString("- run_id: " + strings.TrimSpace(runID) + "\n")
+	if strings.TrimSpace(runTitle) != "" {
+		b.WriteString("- run_title: " + oneLine(runTitle) + "\n")
+	}
 	b.WriteString("- at: " + at + "\n")
+	b.WriteString("- at_minute: " + atMinute + "\n")
 	if strings.TrimSpace(userReq) != "" {
 		b.WriteString("- user_request: " + oneLine(userReq) + "\n")
 	}
@@ -238,8 +255,13 @@ func callMemoryUpdateModel(ctx context.Context, client chatClient, prompt string
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+
+	callCtx := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithTimeout(ctx, defaultMemoryMDUpdateModelTimeout)
+		defer cancel()
+	}
 
 	sys := llm.Message{
 		Role: "system",
@@ -265,7 +287,6 @@ func callMemoryUpdateModel(ctx context.Context, client chatClient, prompt string
 	if out == "" {
 		return "", errors.New("empty llm output")
 	}
-	_ = maxChars
 	return out, nil
 }
 
