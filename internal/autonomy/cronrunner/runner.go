@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -251,6 +252,20 @@ func (r *Runner) runJob(ctx context.Context, job cron.Job, claimedAt time.Time) 
 
 	finishedAt := time.Now().UTC()
 
+	outputFile := ""
+	if strings.TrimSpace(output) != "" {
+		runDir := filepath.Join(r.runsDir, safeName(job.ID))
+		if err := os.MkdirAll(runDir, 0o755); err == nil {
+			name := startedAt.UTC().Format("20060102-150405.000000000Z") + ".md"
+			path := filepath.Join(runDir, name)
+			if err := os.WriteFile(path, []byte(output), 0o644); err == nil {
+				if rel, err := filepath.Rel(r.runsDir, path); err == nil {
+					outputFile = filepath.ToSlash(rel)
+				}
+			}
+		}
+	}
+
 	delivered := false
 	deliveryErr := ""
 	if runErr == nil {
@@ -286,6 +301,7 @@ func (r *Runner) runJob(ctx context.Context, job cron.Job, claimedAt time.Time) 
 		Delivered:     delivered,
 		DeliveryErr:   strings.TrimSpace(deliveryErr),
 		OutputPreview: preview,
+		OutputFile:    strings.TrimSpace(outputFile),
 	})
 
 	_ = r.store.FinishJob(job.ID, claimedAt, finishedAt, runErr, cron.FinishOptions{

@@ -58,4 +58,5 @@ type RunRecord struct {
 	Delivered     bool      `json:"delivered"`
 	DeliveryErr   string    `json:"delivery_error,omitempty"`
 	OutputPreview string    `json:"output_preview,omitempty"`
+	OutputFile    string    `json:"output_file,omitempty"` // relative to runs dir
 }

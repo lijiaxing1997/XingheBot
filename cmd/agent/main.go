@@ -633,6 +633,8 @@ func newAgentRuntime(opts runtimeOptions) (*agentRuntime, error) {
 	registry.Register(&tools.CronEnableTool{ConfigPath: opts.ConfigPath, Enabled: true, Wake: wakeCron})
 	registry.Register(&tools.CronEnableTool{ConfigPath: opts.ConfigPath, Enabled: false, Wake: wakeCron})
 	registry.Register(&tools.CronRunNowTool{ConfigPath: opts.ConfigPath, Wake: wakeCron})
+	registry.Register(&tools.CronRunListTool{ConfigPath: opts.ConfigPath})
+	registry.Register(&tools.CronRunGetTool{ConfigPath: opts.ConfigPath})
 
 	var wakeHeartbeat func(reason string)
 	if hbRun != nil {
