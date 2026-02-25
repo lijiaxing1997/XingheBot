@@ -21,6 +21,8 @@ build_one() {
     go build -o "${DIST_DIR}/${out}" ./cmd/agent
 }
 
+build_one darwin amd64 "xinghebot-darwin-amd64"
+build_one darwin arm64 "xinghebot-darwin-arm64"
 build_one linux amd64 "xinghebot-linux-amd64"
 build_one linux arm64 "xinghebot-linux-arm64"
 build_one windows amd64 "xinghebot-windows-amd64.exe"
