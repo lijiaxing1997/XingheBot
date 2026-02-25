@@ -2049,7 +2049,7 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.pageCursor(-1)
 		return true, nil
 	case "left":
-		if typing {
+		if typing && m.input.Value() != "" {
 			return false, nil
 		}
 		m.pageCursor(-1)
@@ -2058,7 +2058,7 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.pageCursor(1)
 		return true, nil
 	case "right":
-		if typing {
+		if typing && m.input.Value() != "" {
 			return false, nil
 		}
 		m.pageCursor(1)
