@@ -274,19 +274,60 @@ func runMaster(args []string) error {
 
 	provider := clusterSlaveProvider{Registry: gw.Registry()}
 
+	if rt.Restart != nil {
+		if sentinel, _ := rt.Restart.ConsumeSentinel(); sentinel != nil {
+			ag.StartupBanner = restart.FormatSentinelMessage(sentinel)
+		}
+	}
+
+	var uiErr error
 	switch strings.ToLower(strings.TrimSpace(*uiMode)) {
 	case "", "tui":
-		return ag.RunInteractiveTUI(context.Background(), os.Stdin, os.Stdout, agent.TUIOptions{
+		uiErr = ag.RunInteractiveTUI(context.Background(), os.Stdin, os.Stdout, agent.TUIOptions{
 			Coordinator:   rt.Coordinator,
 			ConfigPath:    *configPath,
 			SlaveProvider: provider,
 		})
 	default:
 		fmt.Printf("%s master ready. WS=%s%s (instance=%s)\n", appinfo.Display(), strings.TrimSpace(srv.Addr), path, gw.InstanceID())
-		err := ag.RunInteractive(context.Background(), os.Stdin, os.Stdout)
-		if err != nil {
-			return err
+		uiErr = ag.RunInteractive(context.Background(), os.Stdin, os.Stdout)
+	}
+
+	if uiErr != nil {
+		return uiErr
+	}
+
+	if rt.Restart != nil && rt.Restart.IsRestartRequested() {
+		// Best-effort cleanup before exec/exit (defers do not run on exec/os.Exit).
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = srv.Shutdown(ctx)
+		cancel()
+		_ = srv.Close()
+		_ = ln.Close()
+		if err := presence.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "warning:", err)
 		}
+		if gwLogFile != nil {
+			_ = gwLogFile.Close()
+		}
+		if err := rt.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "warning:", err)
+		}
+
+		// When supervised, signal the parent to respawn us.
+		if supervisor.IsSupervisedChild() {
+			os.Exit(restart.ExitCodeRestartRequested)
+		}
+
+		// When not supervised, prefer exec() so the restarted TUI stays in the
+		// foreground job/process group.
+		if execErr := restart.ExecReplacement("", os.Args[1:]); execErr != nil {
+			if _, spawnErr := restart.SpawnReplacement("", os.Args[1:]); spawnErr != nil {
+				return joinErrors(execErr, spawnErr)
+			}
+			os.Exit(0)
+		}
+		return nil
 	}
 
 	select {
