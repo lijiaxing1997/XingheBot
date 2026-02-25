@@ -10,6 +10,7 @@
 ```json
 {
   "model_config": {
+    "model_type": "openai",
     "api_key": "sk-3b7dd428d530441797a87ff41bf98258",
     "base_url": "https://api.deepseek.com",
     "model": "deepseek-chat",
@@ -27,10 +28,11 @@
 
 | 字段 | 类型 | 说明 | 示例 |
 |------|------|------|------|
+| `model_type` | string | 模型提供商类型：`openai` / `anthropics`（缺省为 `openai`） | `"openai"` |
 | `api_key` | string | LLM API密钥 | `"sk-3b7dd428d530441797a87ff41bf98258"` |
-| `base_url` | string | API基础URL | `"https://api.deepseek.com"` |
+| `base_url` | string | API 基础 URL（支持第三方代理/网关）。Anthropics 建议不要包含结尾的 `/v1`（本项目会自动兼容去掉尾部 `/v1`） | `"https://api.deepseek.com"` |
 | `model` | string | 使用的模型名称 | `"deepseek-chat"` |
-| `max_tokens` | integer | 最大 token 数（`0` 表示省略该参数，使用 provider 默认值） | `8192` |
+| `max_tokens` | integer | 最大 token 数（OpenAI：`0` 表示省略该参数；Anthropics：`0` 会使用默认值 `1024`） | `8192` |
 
 #### web_search
 

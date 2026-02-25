@@ -1,5 +1,6 @@
 {
   "model_config": {
+    "model_type": "openai",
     "api_key": "sk-your-api-key-here",
     "base_url": "https://api.deepseek.com",
     "model": "deepseek-chat",

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 )
@@ -76,13 +77,15 @@ type Usage struct {
 }
 
 type Client struct {
+	ModelType  ModelType
 	BaseURL    string
 	APIKey     string
 	Model      string
 	MaxTokens  int
 	HTTPClient *http.Client
 
-	sdk openai.Client
+	sdk          openai.Client
+	anthropicSDK anthropic.Client
 }
 
 type Config struct {
@@ -99,6 +102,7 @@ type Config struct {
 }
 
 type ModelConfig struct {
+	ModelType string `json:"model_type"`
 	APIKey    string `json:"api_key"`
 	BaseURL   string `json:"base_url"`
 	Model     string `json:"model"`
@@ -140,6 +144,7 @@ func NewClientFromEnv() (*Client, error) {
 		}
 	}
 	c := &Client{
+		ModelType: ModelTypeOpenAI,
 		BaseURL:   strings.TrimRight(baseURL, "/"),
 		APIKey:    apiKey,
 		Model:     model,
@@ -160,19 +165,36 @@ func NewClientFromConfig(path string) (*Client, error) {
 		return nil, err
 	}
 	mc := cfg.resolvedModelConfig()
+	modelType, err := ParseModelType(mc.ModelType)
+	if err != nil {
+		return nil, err
+	}
 	apiKey := strings.TrimSpace(mc.APIKey)
 	if apiKey == "" {
 		return nil, errors.New("model_config.api_key (or legacy api_key) is required in config.json")
 	}
 	baseURL := strings.TrimSpace(mc.BaseURL)
 	if baseURL == "" {
-		baseURL = "https://api.openai.com"
+		switch modelType {
+		case ModelTypeAnthropics:
+			baseURL = defaultAnthropicBaseURL
+		default:
+			baseURL = defaultBaseURL
+		}
 	}
 	model := strings.TrimSpace(mc.Model)
-	if model == "" {
-		model = "gpt-4o-mini"
+	switch modelType {
+	case ModelTypeAnthropics:
+		if model == "" {
+			return nil, errors.New("model_config.model is required when model_config.model_type is anthropics")
+		}
+	default:
+		if model == "" {
+			model = "gpt-4o-mini"
+		}
 	}
 	c := &Client{
+		ModelType: modelType,
 		BaseURL:   strings.TrimRight(baseURL, "/"),
 		APIKey:    apiKey,
 		Model:     model,
@@ -181,8 +203,15 @@ func NewClientFromConfig(path string) (*Client, error) {
 			Timeout: 120 * time.Second,
 		},
 	}
-	if err := c.initSDK(); err != nil {
-		return nil, err
+	switch modelType {
+	case ModelTypeAnthropics:
+		if err := c.initAnthropicSDK(); err != nil {
+			return nil, err
+		}
+	default:
+		if err := c.initSDK(); err != nil {
+			return nil, err
+		}
 	}
 	return c, nil
 }
@@ -210,6 +239,7 @@ func (c Config) resolvedModelConfig() ModelConfig {
 		return *c.ModelConfig
 	}
 	return ModelConfig{
+		ModelType: "",
 		APIKey:    c.APIKey,
 		BaseURL:   c.BaseURL,
 		Model:     c.Model,
@@ -220,6 +250,9 @@ func (c Config) resolvedModelConfig() ModelConfig {
 func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	if c == nil {
 		return nil, errors.New("nil client")
+	}
+	if c.ModelType == ModelTypeAnthropics {
+		return c.chatAnthropics(ctx, req)
 	}
 	if err := c.ensureSDK(); err != nil {
 		return nil, err
