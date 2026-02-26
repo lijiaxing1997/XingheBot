@@ -449,10 +449,21 @@ func (t *RemoteAgentRunTool) callAsync(ctx context.Context, runID string, rawArg
 	go func() {
 		defer cleanup()
 
-		waitCtx := ctx
+		// NOTE: In the TUI we intentionally cancel the "turn" context once the primary
+		// agent finishes replying (see tuiModel.clearRunTask). remote_agent_run is
+		// designed to be non-blocking in interactive sessions, so the background
+		// waiter MUST NOT be tied to that per-turn cancellation; otherwise the
+		// remote run will be marked failed ("context canceled") and the gateway
+		// pending reply channel will be cleaned up, dropping the real result.
+		waitBase := ctx
+		if waitBase == nil {
+			waitBase = context.Background()
+		}
+		waitBase = context.WithoutCancel(waitBase)
+		waitCtx := waitBase
 		cancel := func() {}
 		if timeout > 0 {
-			waitCtx, cancel = context.WithTimeout(ctx, timeout)
+			waitCtx, cancel = context.WithTimeout(waitBase, timeout)
 		}
 		defer cancel()
 
@@ -473,7 +484,11 @@ func (t *RemoteAgentRunTool) callAsync(ctx context.Context, runID string, rawArg
 		errText := ""
 		output := ""
 		if waitErr != nil {
-			finalStatus = multiagent.StatusFailed
+			if errors.Is(waitErr, context.Canceled) {
+				finalStatus = multiagent.StatusCanceled
+			} else {
+				finalStatus = multiagent.StatusFailed
+			}
 			errText = waitErr.Error()
 		} else {
 			output = strings.TrimSpace(res.Output)
@@ -492,7 +507,13 @@ func (t *RemoteAgentRunTool) callAsync(ctx context.Context, runID string, rawArg
 			reqID,
 			func() string {
 				if waitErr != nil {
-					return "timeout"
+					if errors.Is(waitErr, context.DeadlineExceeded) {
+						return "timeout"
+					}
+					if errors.Is(waitErr, context.Canceled) {
+						return "canceled"
+					}
+					return "failed"
 				}
 				if s := strings.TrimSpace(res.Status); s != "" {
 					return s
