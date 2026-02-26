@@ -414,7 +414,7 @@ description: XingheBot 项目架构/功能/配置与二次开发手册（含 con
 
 > TODO: 在这里填你的仓库地址，例如 `https://github.com/<OWNER>/<REPO>`
 >
-> - `GITHUB_REPO_URL = REPLACE_ME`
+> - `GITHUB_REPO_URL = https://github.com/lijiaxing1997/XingheBot`
 
 ### 8.2 标准开发流程（Agent 可执行的命令模板）
 
