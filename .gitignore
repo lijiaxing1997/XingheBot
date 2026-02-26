@@ -27,3 +27,4 @@ venv/
 
 # Build artifacts
 dist/
+bin/
