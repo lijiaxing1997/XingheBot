@@ -43,7 +43,7 @@ chmod +x ./xinghebot
 ### 2) 填好 `config.json` 的 `model_config`，然后开聊
 
 ```bash
-./xinghebot chat --config config.json
+./xinghebot master
 ```
 
 ## master / slave 怎么用
