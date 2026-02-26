@@ -73,6 +73,24 @@ chmod +x ./xinghebot
 - `cluster.secret` 必须 master/slave 一致；master 启动时如果 `cluster.secret` 为空，会自动生成并写回 `config.json`，把它复制到每个 slave 的配置里即可
 - `slave` 默认读 `./slave-config.json`；如果当前目录有 `./config.json`，也会回退使用它
 
+## 快捷键（终端 UI / TUI）
+
+适用于 `chat/master/slave` 在终端的交互界面：
+
+- `Ctrl+C`：退出
+- `Ctrl+N`：新建会话
+- `Ctrl+R`：刷新会话列表
+- `Shift+↑/↓`（或 `Alt+↑/↓`）：切换会话
+- `Ctrl+D`：删除当前会话（3 秒内连按两次确认）
+- `TAB`：切换主 Agent / 子 Agent 视图
+- `Ctrl+T`：显示/隐藏已完成的子 Agent
+- `Ctrl+E`：取消/终止
+  - 主 Agent：取消当前运行中的任务
+  - 子 Agent：强制终止该子 Agent
+- `Ctrl+L`：回到底部（跟随最新输出）
+- `↑/↓`（或非输入状态下 `k/j`）：滚动
+- `PgUp/PgDn`（或空输入时 `←/→`）：翻页滚动
+
 ## 配置（`config.json`）
 
 默认读取 `./config.json`（可用 `--config <file>` 指定）。建议直接从模板开始：
@@ -115,8 +133,7 @@ Web 搜索（可选）：
   - `imap` / `smtp`：服务器、端口、SSL（`126` 默认值可用）
   - `poll_interval_seconds`：轮询间隔（秒）
   - `allowed_senders`：允许触发的发件人（逗号/空格分隔）
- 
-- 邮件标题为会话标题，直接使用allowed_senders里允许的邮箱向`email_address`发送邮件即可。AI会将消息通过回复邮件发送给你，你再次基础上继续回复即可。开启新会话请重新启一封邮件使用不同标题即可。
+  - 邮件标题为会话标题：用 `allowed_senders` 里允许的邮箱向 `email_address` 发送邮件即可；AI 会用“回复邮件”把结果发回。继续对话时直接在同一邮件线程里回复即可；开启新会话请新起一封邮件并使用不同标题。
 
 #### `assistant.reply_style`
 
