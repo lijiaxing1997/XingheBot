@@ -97,7 +97,7 @@ description: XingheBot 项目架构/功能/配置与二次开发手册（含 con
 ### LLM / 模型接入
 
 - 配置解析：`internal/llm/openai.go`（`LoadConfig`, `NewClientFromConfig`）
-- provider 类型：`internal/llm/model_type.go`（支持 `openai`/`anthropics`）,注意在config.json里是 `model_type` 字段
+- provider 类型：`internal/llm/model_type.go`（支持 `openai`/`anthropic`）,注意在config.json里是 `model_type` 字段
 - Anthropics 适配：`internal/llm/anthropic.go`
 
 ### 工具系统（tool-calling）

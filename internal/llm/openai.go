@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/openai/openai-go/v3"
@@ -396,12 +397,13 @@ func toSDKToolCalls(calls []ToolCall) ([]openai.ChatCompletionMessageToolCallUni
 	for _, c := range calls {
 		callType := strings.TrimSpace(strings.ToLower(c.Type))
 		if callType == "" || callType == "function" {
+			args := sanitizeToolCallArguments(c.Function.Arguments)
 			out = append(out, openai.ChatCompletionMessageToolCallUnionParam{
 				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
 					ID: c.ID,
 					Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
 						Name:      c.Function.Name,
-						Arguments: c.Function.Arguments,
+						Arguments: args,
 					},
 				},
 			})
@@ -410,6 +412,71 @@ func toSDKToolCalls(calls []ToolCall) ([]openai.ChatCompletionMessageToolCallUni
 		return nil, fmt.Errorf("unsupported tool call type: %q", c.Type)
 	}
 	return out, nil
+}
+
+const maxSanitizedToolCallRawArgsBytes = 4096
+
+func sanitizeToolCallArguments(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "{}"
+	}
+
+	valid := json.Valid([]byte(trimmed))
+	if valid && strings.HasPrefix(trimmed, "{") {
+		return trimmed
+	}
+
+	payload := map[string]any{
+		"__raw": clampUTF8(trimmed, maxSanitizedToolCallRawArgsBytes),
+	}
+
+	if valid {
+		payload["__non_object_json"] = true
+	} else {
+		payload["__invalid_json"] = true
+		var tmp any
+		if err := json.Unmarshal([]byte(trimmed), &tmp); err != nil {
+			payload["__error"] = err.Error()
+		}
+	}
+
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return "{}"
+	}
+	return string(out)
+}
+
+func clampUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if s == "" || len(s) <= maxBytes {
+		return s
+	}
+
+	cut := maxBytes
+	if cut > len(s) {
+		cut = len(s)
+	}
+	for cut > 0 && (s[cut-1]&0xC0) == 0x80 {
+		cut--
+	}
+	if cut <= 0 {
+		return ""
+	}
+	out := s[:cut]
+	if !utf8.ValidString(out) {
+		for cut > 0 && !utf8.ValidString(s[:cut]) {
+			cut--
+		}
+		if cut <= 0 {
+			return ""
+		}
+		out = s[:cut]
+	}
+	return strings.TrimRight(out, "\n")
 }
 
 func toSDKTools(tools []ToolDefinition) ([]openai.ChatCompletionToolUnionParam, error) {

@@ -23,6 +23,8 @@ import (
 	"golang.org/x/term"
 
 	"test_skill_agent/internal/appinfo"
+	"test_skill_agent/internal/autonomy"
+	"test_skill_agent/internal/autonomy/cron"
 	"test_skill_agent/internal/cluster"
 	"test_skill_agent/internal/gateway"
 	"test_skill_agent/internal/llm"
@@ -105,6 +107,13 @@ type tuiModel struct {
 	gatewayStatus     gateway.EmailStatus
 	gatewayInbox      []gateway.EmailInbound
 	startGatewayOnce  *sync.Once
+
+	cronEnabled  bool
+	cronJobsPath string
+	cronJobs     []cron.Job
+	cronJobsMod  time.Time
+	cronJobsSize int64
+	cronErr      string
 
 	sessions      []multiagent.RunManifest
 	sessionIndex  int
@@ -250,6 +259,31 @@ func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator, c
 		emailAddr = strings.TrimSpace(gcfg.Email.EmailAddress)
 	}
 
+	cronEnabled := false
+	cronJobsPath := ""
+	cronErr := ""
+	if cfg, err := autonomy.LoadConfig(configPath); err == nil {
+		cronEnabled = true
+		if cfg.Enabled != nil && !*cfg.Enabled {
+			cronEnabled = false
+		}
+		if cfg.Cron.Enabled != nil && !*cfg.Cron.Enabled {
+			cronEnabled = false
+		}
+		jobsPath := strings.TrimSpace(cfg.Cron.StorePath)
+		if jobsPath == "" {
+			workDir, _ := os.Getwd()
+			if resolved, err := cron.ResolveDefaultJobsPath(configPath, workDir); err == nil {
+				jobsPath = resolved
+			} else {
+				cronErr = err.Error()
+			}
+		}
+		cronJobsPath = strings.TrimSpace(jobsPath)
+	} else {
+		cronErr = err.Error()
+	}
+
 	return tuiModel{
 		ctx:               ctx,
 		agent:             a,
@@ -270,6 +304,9 @@ func newTUIModel(ctx context.Context, a *Agent, coord *multiagent.Coordinator, c
 		gatewayEnabled:    enabled,
 		gatewayEmail:      emailAddr,
 		startGatewayOnce:  &sync.Once{},
+		cronEnabled:       cronEnabled,
+		cronJobsPath:      cronJobsPath,
+		cronErr:           cronErr,
 	}
 }
 
@@ -590,6 +627,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.maybeReloadRuns()
 		m.refreshCurrentHistoryFromDisk()
 		m.refreshSlaves()
+		m.refreshCron()
 		m.refreshAgentIDs()
 		m.maybeAutoFollowup()
 		m.maybeProcessGatewayInbox()
@@ -610,6 +648,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ensureSessionLoaded(m.currentRunID())
 		m.createPrimaryAgent(m.currentRunID())
 		m.refreshAgentIDs()
+		m.refreshCron()
 		m.clearNotice()
 		m.rerender()
 		if strings.TrimSpace(prevRunID) != "" && strings.TrimSpace(prevRunID) != strings.TrimSpace(msg.Run.ID) {
@@ -2216,7 +2255,7 @@ func (m tuiModel) View() string {
 
 	left := m.renderLeftPanel(leftW, m.height)
 	center := m.renderCenter(midW, m.height)
-	right := m.renderStatus(rightW, m.height)
+	right := m.renderRightPanel(rightW, m.height)
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, center, right)
 }
 
@@ -2403,6 +2442,46 @@ func (m *tuiModel) refreshSlaves() {
 		return slaves[i].SlaveID < slaves[j].SlaveID
 	})
 	m.slaves = slaves
+}
+
+func (m *tuiModel) refreshCron() {
+	if m == nil {
+		return
+	}
+	jobsPath := strings.TrimSpace(m.cronJobsPath)
+	if jobsPath == "" {
+		m.cronJobs = nil
+		m.cronJobsMod = time.Time{}
+		m.cronJobsSize = 0
+		return
+	}
+
+	info, err := os.Stat(jobsPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			m.cronErr = ""
+			m.cronJobs = nil
+			m.cronJobsMod = time.Time{}
+			m.cronJobsSize = 0
+			return
+		}
+		m.cronErr = err.Error()
+		return
+	}
+
+	if !m.cronJobsMod.IsZero() && info.ModTime().Equal(m.cronJobsMod) && info.Size() == m.cronJobsSize {
+		return
+	}
+
+	st, err := cron.NewStoreManager(jobsPath).Load()
+	if err != nil {
+		m.cronErr = err.Error()
+		return
+	}
+	m.cronErr = ""
+	m.cronJobs = st.Jobs
+	m.cronJobsMod = info.ModTime()
+	m.cronJobsSize = info.Size()
 }
 
 const tuiRunsReloadInterval = 1 * time.Second
@@ -3701,6 +3780,31 @@ func splitLeftPanelHeights(total int) (sessionsH int, slavesH int) {
 	return sessionsH, slavesH
 }
 
+func splitRightPanelHeights(total int) (statusH int, cronH int) {
+	const (
+		statusMin = 8
+		cronMin   = 6
+	)
+	if total <= 0 {
+		return 0, 0
+	}
+	if total < statusMin+3 {
+		return total, 0
+	}
+	if total < statusMin+cronMin {
+		return statusMin, total - statusMin
+	}
+	statusH = total / 2
+	if statusH < statusMin {
+		statusH = statusMin
+	}
+	if statusH > total-cronMin {
+		statusH = total - cronMin
+	}
+	cronH = total - statusH
+	return statusH, cronH
+}
+
 func (m *tuiModel) renderLeftPanel(width int, height int) string {
 	style := lipgloss.NewStyle().Width(width).Height(height).BorderRight(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("8"))
 	sessionsH, slavesH := splitLeftPanelHeights(height)
@@ -3708,6 +3812,27 @@ func (m *tuiModel) renderLeftPanel(width int, height int) string {
 	lines = append(lines, m.renderSessionsLines(width, sessionsH)...)
 	if slavesH > 0 {
 		lines = append(lines, m.renderSlavesLines(width, slavesH)...)
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	contentW := max(0, width-1)
+	for i := range lines {
+		lines[i] = fitPanelLine(lines[i], contentW)
+	}
+	return style.Render(strings.Join(lines, "\n"))
+}
+
+func (m *tuiModel) renderRightPanel(width int, height int) string {
+	style := lipgloss.NewStyle().Width(width).Height(height).BorderLeft(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("8"))
+	statusH, cronH := splitRightPanelHeights(height)
+	lines := make([]string, 0, height)
+	lines = append(lines, m.renderStatusLines(width, statusH)...)
+	if cronH > 0 {
+		lines = append(lines, m.renderCronLines(width, cronH)...)
 	}
 	for len(lines) < height {
 		lines = append(lines, "")
@@ -3888,6 +4013,304 @@ func formatAge(t time.Time) string {
 	default:
 		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
+}
+
+func formatUntil(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := time.Until(t)
+	if d <= 0 {
+		return "due"
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+func (m *tuiModel) renderStatusLines(width int, height int) []string {
+	if height <= 0 {
+		return nil
+	}
+	contentW := max(0, width-1)
+	var lines []string
+	lines = append(lines, lipgloss.NewStyle().Bold(true).Render("Status"))
+	if height == 1 {
+		return lines
+	}
+	lines = append(lines, "")
+
+	runID := m.currentRunID()
+	var states []multiagent.AgentState
+	if m.coord != nil && strings.TrimSpace(runID) != "" {
+		states, _ = m.coord.ListAgentStates(runID)
+	}
+	stateMap := make(map[string]multiagent.AgentState, len(states))
+	for _, st := range states {
+		stateMap[st.AgentID] = st
+	}
+	if _, ok := stateMap[tuiPrimaryAgentID]; !ok {
+		stateMap[tuiPrimaryAgentID] = multiagent.AgentState{AgentID: tuiPrimaryAgentID, Status: "chat"}
+	}
+
+	ids := append([]string(nil), m.agentIDs...)
+	if len(ids) == 0 {
+		ids = []string{tuiPrimaryAgentID}
+	}
+	for _, id := range ids {
+		st := stateMap[id]
+		arrow := " "
+		if id == m.currentAgentID() {
+			arrow = ">"
+		}
+		status := strings.TrimSpace(st.Status)
+		if status == "" {
+			status = "unknown"
+		}
+		statusStyle := statusColor(status)
+		line := fmt.Sprintf("%s %s %s", arrow, id, statusStyle.Render(status))
+		lines = append(lines, truncateANSI(line, contentW))
+		if len(lines) >= height {
+			return lines[:height]
+		}
+	}
+
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	if m.hiddenManual > 0 {
+		hidden := fmt.Sprintf("hidden archived: %d", m.hiddenManual)
+		lines = append(lines, truncateANSI(hintStyle.Render(hidden), contentW))
+		if len(lines) >= height {
+			return lines[:height]
+		}
+	}
+	if !m.showDone && m.hiddenDone > 0 {
+		hidden := fmt.Sprintf("hidden finished: %d (Ctrl+T)", m.hiddenDone)
+		lines = append(lines, truncateANSI(hintStyle.Render(hidden), contentW))
+		if len(lines) >= height {
+			return lines[:height]
+		}
+	}
+
+	hints := []string{
+		hintStyle.Render("TAB: switch agent"),
+		hintStyle.Render("Ctrl+T: toggle finished"),
+		hintStyle.Render("Ctrl+E: cancel/kill"),
+	}
+	for i := range hints {
+		hints[i] = truncateANSI(hints[i], contentW)
+	}
+	for len(hints) > 0 && height-len(lines)-len(hints) < 0 {
+		hints = hints[:len(hints)-1]
+	}
+	need := height - len(lines) - len(hints)
+	for need > 0 {
+		lines = append(lines, "")
+		need--
+	}
+	lines = append(lines, hints...)
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return lines
+}
+
+func (m *tuiModel) renderCronLines(width int, height int) []string {
+	if height <= 0 {
+		return nil
+	}
+	contentW := max(0, width-1)
+	var lines []string
+	lines = append(lines, lipgloss.NewStyle().Bold(true).Render("Cron"))
+	if height == 1 {
+		return lines
+	}
+	lines = append(lines, "")
+
+	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+
+	if errText := strings.TrimSpace(m.cronErr); errText != "" {
+		lines = append(lines, truncateANSI(errStyle.Render("err: "+safeOneLine(errText, 120)), contentW))
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		if len(lines) > height {
+			lines = lines[:height]
+		}
+		return lines
+	}
+
+	if strings.TrimSpace(m.cronJobsPath) == "" {
+		lines = append(lines, truncateANSI(mutedStyle.Render("(cron store not configured)"), contentW))
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		if len(lines) > height {
+			lines = lines[:height]
+		}
+		return lines
+	}
+
+	if !m.cronEnabled {
+		lines = append(lines, truncateANSI(mutedStyle.Render("(disabled in config)"), contentW))
+		if len(lines) >= height {
+			return lines[:height]
+		}
+	}
+
+	jobs := append([]cron.Job(nil), m.cronJobs...)
+	jobKind := func(job cron.Job) string {
+		switch {
+		case !job.RunningAt.IsZero():
+			return "running"
+		case strings.TrimSpace(job.LastError) != "" || job.FailCount > 0:
+			return "error"
+		case !job.LastRunAt.IsZero():
+			return "ok"
+		case job.Enabled:
+			return "next"
+		default:
+			return "off"
+		}
+	}
+	jobWeight := func(kind string) int {
+		switch kind {
+		case "running":
+			return 0
+		case "error":
+			return 1
+		case "next":
+			return 2
+		case "ok":
+			return 3
+		case "off":
+			return 4
+		default:
+			return 5
+		}
+	}
+	jobLabel := func(job cron.Job) string {
+		label := strings.TrimSpace(job.Name)
+		if label == "" {
+			label = strings.TrimSpace(job.ID)
+		}
+		if label == "" {
+			label = "(unnamed)"
+		}
+		return label
+	}
+	sort.Slice(jobs, func(i, j int) bool {
+		ki := jobKind(jobs[i])
+		kj := jobKind(jobs[j])
+		wi := jobWeight(ki)
+		wj := jobWeight(kj)
+		if wi != wj {
+			return wi < wj
+		}
+		ni := jobs[i].NextRunAt
+		nj := jobs[j].NextRunAt
+		if !ni.Equal(nj) {
+			if ni.IsZero() {
+				return false
+			}
+			if nj.IsZero() {
+				return true
+			}
+			return ni.Before(nj)
+		}
+		li := strings.ToLower(strings.TrimSpace(jobLabel(jobs[i])))
+		lj := strings.ToLower(strings.TrimSpace(jobLabel(jobs[j])))
+		if li != lj {
+			return li < lj
+		}
+		return strings.TrimSpace(jobs[i].ID) < strings.TrimSpace(jobs[j].ID)
+	})
+
+	if len(jobs) == 0 {
+		lines = append(lines, truncateANSI(mutedStyle.Render("(no cron jobs)"), contentW))
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		if len(lines) > height {
+			lines = lines[:height]
+		}
+		return lines
+	}
+
+	okDotStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	runDotStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	errorDotStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	offDotStyle := mutedStyle
+
+	for _, job := range jobs {
+		kind := jobKind(job)
+		label := jobLabel(job)
+
+		dot := "○"
+		if job.Enabled {
+			dot = "●"
+		}
+
+		dotStyle := offDotStyle
+		switch kind {
+		case "running":
+			dotStyle = runDotStyle
+		case "error":
+			dotStyle = errorDotStyle
+		case "ok", "next":
+			dotStyle = okDotStyle
+		}
+
+		token := ""
+		timeHint := ""
+		switch kind {
+		case "running":
+			token = "run"
+			timeHint = formatAge(job.RunningAt)
+		case "error":
+			token = "err"
+			if job.Enabled && !job.NextRunAt.IsZero() {
+				token = "err→" + formatUntil(job.NextRunAt)
+			}
+		case "ok":
+			token = "ok"
+			timeHint = formatAge(job.LastRunAt)
+		case "next":
+			token = "next"
+			if !job.NextRunAt.IsZero() {
+				timeHint = formatUntil(job.NextRunAt)
+			}
+		case "off":
+			token = "off"
+		}
+
+		line := fmt.Sprintf("%s %s", dotStyle.Render(dot), label)
+		if strings.TrimSpace(token) != "" {
+			line += " " + token
+		}
+		if strings.TrimSpace(timeHint) != "" {
+			line += " " + mutedStyle.Render(timeHint)
+		}
+		lines = append(lines, truncateANSI(line, contentW))
+		if len(lines) >= height {
+			return lines[:height]
+		}
+	}
+
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return lines
 }
 
 func (m *tuiModel) renderSessions(width int, height int) string {
