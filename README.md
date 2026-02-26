@@ -115,6 +115,8 @@ Web 搜索（可选）：
   - `imap` / `smtp`：服务器、端口、SSL（`126` 默认值可用）
   - `poll_interval_seconds`：轮询间隔（秒）
   - `allowed_senders`：允许触发的发件人（逗号/空格分隔）
+ 
+- 邮件标题为会话标题，直接使用allowed_senders里允许的邮箱向`email_address`发送邮件即可。AI会将消息通过回复邮件发送给你，你再次基础上继续回复即可。开启新会话请重新启一封邮件使用不同标题即可。
 
 #### `assistant.reply_style`
 
