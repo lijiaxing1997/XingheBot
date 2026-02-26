@@ -4165,7 +4165,21 @@ func (m *tuiModel) renderCronLines(width int, height int) []string {
 		}
 	}
 
-	jobs := append([]cron.Job(nil), m.cronJobs...)
+	jobs := make([]cron.Job, 0, len(m.cronJobs))
+	for _, job := range m.cronJobs {
+		isOneShot := strings.EqualFold(strings.TrimSpace(job.Schedule.Type), "at")
+		isDone := isOneShot &&
+			!job.Enabled &&
+			job.RunningAt.IsZero() &&
+			job.NextRunAt.IsZero() &&
+			!job.LastRunAt.IsZero() &&
+			job.FailCount == 0 &&
+			strings.TrimSpace(job.LastError) == ""
+		if isDone {
+			continue
+		}
+		jobs = append(jobs, job)
+	}
 	jobKind := func(job cron.Job) string {
 		switch {
 		case !job.RunningAt.IsZero():
