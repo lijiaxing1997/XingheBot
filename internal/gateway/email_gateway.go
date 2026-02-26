@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"mime"
 	"net"
@@ -575,14 +576,27 @@ func (g *EmailGateway) SendReplyWithAttachments(ctx context.Context, to string, 
 
 	attachments = normalizeEmailAttachments(attachments)
 	msg := ""
-	if len(attachments) == 0 {
-		msg = buildTextEmail(from, to, subjectEncoded, body, threadInReplyTo, threadRefs)
-	} else {
-		encoded, err := buildMixedEmail(from, to, subjectEncoded, body, threadInReplyTo, threadRefs, attachments)
-		if err != nil {
-			return err
+	htmlBody, htmlErr := renderEmailHTML(subject, body)
+	if htmlErr == nil && strings.TrimSpace(htmlBody) != "" {
+		if len(attachments) == 0 {
+			msg = buildAlternativeEmail(from, to, subjectEncoded, body, htmlBody, threadInReplyTo, threadRefs)
+		} else {
+			encoded, err := buildMixedAlternativeEmail(from, to, subjectEncoded, body, htmlBody, threadInReplyTo, threadRefs, attachments)
+			if err != nil {
+				return err
+			}
+			msg = encoded
 		}
-		msg = encoded
+	} else {
+		if len(attachments) == 0 {
+			msg = buildTextEmail(from, to, subjectEncoded, body, threadInReplyTo, threadRefs)
+		} else {
+			encoded, err := buildMixedEmail(from, to, subjectEncoded, body, threadInReplyTo, threadRefs, attachments)
+			if err != nil {
+				return err
+			}
+			msg = encoded
+		}
 	}
 	if _, err := w.Write([]byte(msg)); err != nil {
 		return fmt.Errorf("smtp write failed: %w", err)
@@ -618,6 +632,60 @@ func buildTextEmail(from string, to string, subject string, body string, inReply
 		"Date: "+time.Now().Format(time.RFC1123Z),
 	)
 	return strings.Join(headers, "\r\n") + "\r\n\r\n" + body + "\r\n"
+}
+
+func buildAlternativeEmail(from string, to string, subject string, plain string, htmlBody string, inReplyTo string, references []string) string {
+	if strings.TrimSpace(plain) == "" {
+		plain = "(empty)"
+	}
+	if strings.TrimSpace(htmlBody) == "" {
+		escaped := html.EscapeString(plain)
+		htmlBody = "<pre style=\"white-space:pre-wrap; word-wrap:break-word;\">" + escaped + "</pre>"
+	}
+
+	plain = strings.ReplaceAll(plain, "\r\n", "\n")
+	plain = strings.ReplaceAll(plain, "\n", "\r\n")
+	htmlBody = strings.ReplaceAll(htmlBody, "\r\n", "\n")
+	htmlBody = strings.ReplaceAll(htmlBody, "\n", "\r\n")
+
+	boundary := randomBoundary("alt")
+
+	headers := []string{
+		"From: " + from,
+		"To: " + to,
+		"Subject: " + subject,
+	}
+	if v := formatMessageID(inReplyTo); v != "" {
+		headers = append(headers, "In-Reply-To: "+v)
+	}
+	if refs := formatReferencesHeaderValue(references); refs != "" {
+		headers = append(headers, "References: "+refs)
+	}
+	headers = append(headers,
+		"MIME-Version: 1.0",
+		fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"", boundary),
+		"Date: "+time.Now().Format(time.RFC1123Z),
+	)
+
+	var b strings.Builder
+	b.Grow(4096 + len(plain) + len(htmlBody))
+	b.WriteString(strings.Join(headers, "\r\n"))
+	b.WriteString("\r\n\r\n")
+
+	b.WriteString("--" + boundary + "\r\n")
+	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
+	b.WriteString(plain)
+	b.WriteString("\r\n")
+
+	b.WriteString("--" + boundary + "\r\n")
+	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
+	b.WriteString(htmlBody)
+	b.WriteString("\r\n")
+
+	b.WriteString("--" + boundary + "--\r\n")
+	return b.String()
 }
 
 func normalizeEmailAttachments(list []EmailAttachment) []EmailAttachment {
@@ -705,6 +773,89 @@ func buildMixedEmail(from string, to string, subject string, body string, inRepl
 	b.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
 	b.WriteString(body)
 	b.WriteString("\r\n")
+
+	for _, att := range attachments {
+		data, err := os.ReadFile(att.Path)
+		if err != nil {
+			return "", fmt.Errorf("read attachment %s: %w", strings.TrimSpace(att.Path), err)
+		}
+		filename := strings.TrimSpace(att.Name)
+		if filename == "" {
+			filename = filepath.Base(att.Path)
+		}
+		ct := strings.TrimSpace(att.ContentType)
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		ascii, escaped := encodeFilenameParams(filename)
+
+		b.WriteString("--" + boundary + "\r\n")
+		b.WriteString(fmt.Sprintf("Content-Type: %s; name=\"%s\"; name*=UTF-8''%s\r\n", ct, ascii, escaped))
+		b.WriteString("Content-Transfer-Encoding: base64\r\n")
+		b.WriteString(fmt.Sprintf("Content-Disposition: attachment; filename=\"%s\"; filename*=UTF-8''%s\r\n\r\n", ascii, escaped))
+		b.WriteString(encodeBase64MIME(data))
+	}
+
+	b.WriteString("--" + boundary + "--\r\n")
+	return b.String(), nil
+}
+
+func buildMixedAlternativeEmail(from string, to string, subject string, plain string, htmlBody string, inReplyTo string, references []string, attachments []EmailAttachment) (string, error) {
+	if strings.TrimSpace(plain) == "" {
+		plain = "(empty)"
+	}
+	if strings.TrimSpace(htmlBody) == "" {
+		escaped := html.EscapeString(plain)
+		htmlBody = "<pre style=\"white-space:pre-wrap; word-wrap:break-word;\">" + escaped + "</pre>"
+	}
+
+	plain = strings.ReplaceAll(plain, "\r\n", "\n")
+	plain = strings.ReplaceAll(plain, "\n", "\r\n")
+	htmlBody = strings.ReplaceAll(htmlBody, "\r\n", "\n")
+	htmlBody = strings.ReplaceAll(htmlBody, "\n", "\r\n")
+
+	boundary := randomBoundary("mix")
+	altBoundary := randomBoundary("alt")
+
+	headers := []string{
+		"From: " + from,
+		"To: " + to,
+		"Subject: " + subject,
+	}
+	if v := formatMessageID(inReplyTo); v != "" {
+		headers = append(headers, "In-Reply-To: "+v)
+	}
+	if refs := formatReferencesHeaderValue(references); refs != "" {
+		headers = append(headers, "References: "+refs)
+	}
+	headers = append(headers,
+		"MIME-Version: 1.0",
+		fmt.Sprintf("Content-Type: multipart/mixed; boundary=\"%s\"", boundary),
+		"Date: "+time.Now().Format(time.RFC1123Z),
+	)
+
+	var b strings.Builder
+	b.Grow(4096 + len(plain) + len(htmlBody))
+	b.WriteString(strings.Join(headers, "\r\n"))
+	b.WriteString("\r\n\r\n")
+
+	// multipart/alternative part
+	b.WriteString("--" + boundary + "\r\n")
+	b.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", altBoundary))
+
+	b.WriteString("--" + altBoundary + "\r\n")
+	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
+	b.WriteString(plain)
+	b.WriteString("\r\n")
+
+	b.WriteString("--" + altBoundary + "\r\n")
+	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
+	b.WriteString(htmlBody)
+	b.WriteString("\r\n")
+
+	b.WriteString("--" + altBoundary + "--\r\n")
 
 	for _, att := range attachments {
 		data, err := os.ReadFile(att.Path)
