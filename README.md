@@ -1,5 +1,9 @@
 # XingheBot
 
+<p align="center">
+  <img src="images/main.png" alt="XingheBot" width="720" />
+</p>
+
 一个 Go 写的多 Agent CLI：既能本地 `chat`，也能用 `master/slave` 跑分布式任务。大部分东西都写在 `config.json` 里。
 
 ## 快速安装（推荐：下载二进制）
