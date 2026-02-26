@@ -1,6 +1,20 @@
 # macOS
 .DS_Store
 
+# Local config (contains secrets)
+config.json
+
+# Node dependencies
+node_modules/
+
+# Local docs (do not publish)
+docs/
+
+# Local state / run artifacts
+.clawhub/
+.cluster/
+.multi_agent/
+
 # Python bytecode/cache
 __pycache__/
 *.pyc
@@ -10,12 +24,6 @@ __pycache__/
 # Local virtual environments
 venv/
 */venv/
-
-# Multi-agent run artifacts
-.multi_agent/runs/
-.multi_agent/archive/
-.multi_agent/restart-sentinel.json
-.multi_agent/.restart-sentinel-*.json
 
 # Build artifacts
 dist/
