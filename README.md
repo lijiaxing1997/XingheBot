@@ -35,9 +35,9 @@ chmod +x ./xinghebot
 命令任选其一：
 
 ```bash
-./xinghebot chat --init
-./xinghebot master --init
-./xinghebot slave --init
+./xinghebot chat --init # 单机模式
+./xinghebot master --init # 分布式：主 Agent
+./xinghebot slave --init # 分布式：从 Agent
 ```
 
 ### 2) 填好 `config.json` 的 `model_config`，然后开聊
@@ -53,20 +53,19 @@ chmod +x ./xinghebot
 启动 master（默认监听 `0.0.0.0:7788`，WS 路径 `/ws`）：
 
 ```bash
-./xinghebot master --config config.json
+./xinghebot master
 ```
 
 启动 slave（推荐给 slave 单独放一个配置文件）：
 
 ```bash
-cp slave-config.exm.json slave-config.json
-./xinghebot slave --config slave-config.json
+./xinghebot slave --config slave-config.json # 不指定 --config 默认 slave-config.json
 ```
 
 你也可以直接用参数指定 master 地址：
 
 ```bash
-./xinghebot slave --master ws://<MASTER_IP>:7788/ws
+./xinghebot slave --master ws://<MASTER_IP>:7788/ws # 不指定 --master 默认 config.json 里配置的
 ```
 
 注意两点：
@@ -88,10 +87,10 @@ cp config.exm.json config.json
 
 模型提供商与参数（必配）：
 
-- `model_type`：`openai` / `anthropics`
-- `api_key`：模型 API Key（敏感信息，别提交到仓库）
-- `base_url`：API Base URL（OpenAI 兼容提供商/自建网关可填；Anthropic 默认 `https://api.anthropic.com`）
-- `model`：模型名（`anthropics` 必填；`openai` 留空默认 `gpt-4o-mini`）
+- `model_type`：`openai` / `anthropics`（兼容旧值 `anthropic`）
+- `api_key`：模型 API Key
+- `base_url`：API Base URL（支持OpenAI和Anthropic两种范式接口，第三方/官方均可）
+- `model`：模型名
 - `max_tokens`：输出上限；`0` 表示：
   - `openai`：不传该参数，走服务端默认
   - `anthropics`：使用默认 `1024`
@@ -102,10 +101,11 @@ Web 搜索（可选）：
 
 - `tavily_api_key`：Tavily API Key（用于工具 `tavily_search` / `tavily_extract` / `tavily_crawl`）
   - 也支持环境变量 `TAVILY_API_KEY`
+  - tavily用户每个人每月1000次search额度，个人用户够用
 
 #### `gateway`
 
-邮件网关（可选，用于“收邮件触发/发邮件通知”等场景）：
+邮件网关（可选，用于“收邮件触发/发邮件通知”等场景，如果你想使用飞书/钉钉等即时通讯工具请自己适配）：
 
 - `gateway.enabled`：是否启用
 - `gateway.email`：邮箱配置
@@ -126,7 +126,7 @@ Web 搜索（可选）：
 
 #### `autonomy.cron.email_to`
 
-自治任务默认收件人（可选）：
+自治任务默认收件人（可选，定时任务默认走邮件通知）：
 
 - `email_to`：逗号分隔的收件人列表（cron/heartbeat 等投递默认收件人）
 - 需要同时配置 `gateway.email` 才能真正发出邮件
