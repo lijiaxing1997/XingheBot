@@ -97,7 +97,7 @@ description: XingheBot 项目架构/功能/配置与二次开发手册（含 con
 ### LLM / 模型接入
 
 - 配置解析：`internal/llm/openai.go`（`LoadConfig`, `NewClientFromConfig`）
-- provider 类型：`internal/llm/model_type.go`（支持 `openai`/`anthropics`）
+- provider 类型：`internal/llm/model_type.go`（支持 `openai`/`anthropics`）,注意在config.json里是 `model_type` 字段
 - Anthropics 适配：`internal/llm/anthropic.go`
 
 ### 工具系统（tool-calling）
@@ -191,15 +191,15 @@ description: XingheBot 项目架构/功能/配置与二次开发手册（含 con
 读取位置：`internal/llm/openai.go`（`LoadConfig`, `NewClientFromConfig`）
 
 - `model_config.model_type`：模型供应商类型。
-  - 支持：`openai`（默认）/ `anthropics`（兼容 `anthropic` 拼写）。
+  - 支持：`openai`（默认）/ `anthropic`（兼容 `anthropics` 拼写）。
   - 代码：`internal/llm/model_type.go`
 - `model_config.api_key`：API Key（必填，除非你走环境变量/自定义逻辑；本项目默认要求这里有值）。
 - `model_config.base_url`：Base URL（可为空）。
   - `openai` 兼容默认：`https://api.openai.com`
-  - `anthropics` 兼容默认：见 `internal/llm/anthropic.go` 的默认常量
+  - `anthropicc` 兼容默认：见 `internal/llm/anthropic.go` 的默认常量
 - `model_config.model`：模型名。
   - `openai` 兼容：为空时默认 `gpt-4o-mini`（见 `internal/llm/openai.go`）
-  - `anthropics`：必须显式填写（否则报错）
+  - `anthropicc`：必须显式填写（否则报错）
 - `model_config.max_tokens`：单次 completion 上限。
   - **OpenAI-compatible**：当为 `0` 时，会省略 `max_tokens` 参数（让 provider 用默认值）。
   - **Anthropics**：需要 `max_tokens`；若为 `0`，程序会用一个默认值（当前注释写的是 1024，见模板 `notes`）。
